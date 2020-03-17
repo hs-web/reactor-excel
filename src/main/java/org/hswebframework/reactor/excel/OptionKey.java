@@ -4,9 +4,11 @@ public interface OptionKey<T> {
 
     String getKey();
 
-    Class<T> getType();
+    default Class<?> getType() {
+        return getClass().getInterfaces()[0];
+    }
 
-    default T cast(Object value) {
-        return getType().cast(value);
+    default <R> R unwrap(Class<R> type) {
+        return type.cast(this);
     }
 }

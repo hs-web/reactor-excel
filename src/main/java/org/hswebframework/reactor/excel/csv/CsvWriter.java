@@ -37,7 +37,7 @@ public class CsvWriter implements ExcelWriter {
     @Override
     public Mono<Void> write(Flux<WritableCell> dataStream,
                             OutputStream outputStream,
-                            ExcelOption<?>... options) {
+                            ExcelOption... options) {
 
 
         return Mono.defer(() -> {
@@ -45,8 +45,7 @@ public class CsvWriter implements ExcelWriter {
                 CSVPrinter printer = new CSVPrinter(new OutputStreamWriter(outputStream), CSVFormat.EXCEL);
                 return dataStream
                         .doOnNext(cell -> doWrite(printer, cell))
-                        .doFinally(s -> closePrinter(printer)).then()
-                        ;
+                        .doFinally(s -> closePrinter(printer)).then();
             } catch (IOException e) {
                 return Mono.error(e);
             }

@@ -10,6 +10,7 @@ import reactor.core.publisher.Mono;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,7 +42,7 @@ public abstract class ReactorExcel {
         }
     }
 
-    static ExcelReader lookupReader(String format) {
+    public static ExcelReader lookupReader(String format) {
         ExcelReader reader = readers.get(format);
         if (reader == null) {
             throw new UnsupportedOperationException("unsupported format:" + format);
@@ -49,7 +50,7 @@ public abstract class ReactorExcel {
         return reader;
     }
 
-    static ExcelWriter lookupWriter(String format) {
+    public static ExcelWriter lookupWriter(String format) {
         ExcelWriter writer = writers.get(format);
         if (writer == null) {
             throw new UnsupportedOperationException("unsupported format:" + format);
@@ -57,18 +58,13 @@ public abstract class ReactorExcel {
         return writer;
     }
 
-
-    public static Flux<Map<String, Object>> readAsMap(InputStream stream, String format) {
-        return read(stream, format, Wrappers.map());
+    public static ReaderOperator<Map<String, Object>> mapReader(String format) {
+        return ReaderOperator.ofMap(lookupReader(format));
     }
 
-    public static <T> Flux<T> read(InputStream stream,
-                                   String format,
-                                   RowWrapper<T> wrapper) {
-        return Flux.defer(() -> lookupReader(format).read(stream).flatMap(wrapper));
+    public static <T> ReaderOperator<T> reader(Class<T> type, String format) {
+        return ReaderOperator.of(lookupReader(format), type);
     }
-
-
 
     public static <T> WriterOperator<T> writer(String format) {
         return WriterOperator.of(lookupWriter(format));

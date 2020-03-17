@@ -10,21 +10,9 @@ public class MapWrapper extends RowWrapper<Map<String, Object>> {
 
     private Map<String, String> headerMapping = new HashMap<>();
 
-    private int headerIndex = 0;
-
-    public MapWrapper headerIndex(int index) {
-        headerIndex = index;
-        return this;
-    }
-
     public MapWrapper header(String header, String key) {
         headerMapping.put(header, key);
         return this;
-    }
-
-    @Override
-    protected int getHeaderIndex() {
-        return headerIndex;
     }
 
     @Override

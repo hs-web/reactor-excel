@@ -1,5 +1,7 @@
 package org.hswebframework.reactor.excel.converter;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.hswebframework.reactor.excel.Cell;
 import reactor.core.publisher.Mono;
 
@@ -11,7 +13,9 @@ public abstract class RowWrapper<T> implements Function<Cell, Mono<T>> {
 
     protected T current;
 
-    protected abstract int getHeaderIndex();
+    @Getter
+    @Setter
+    protected int headerIndex;
 
     volatile long currentRow;
 

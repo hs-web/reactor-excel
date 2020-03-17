@@ -11,7 +11,7 @@ import java.util.Optional;
 @Getter
 @Setter
 @NoArgsConstructor
-public class ExcelHeader {
+public class ExcelHeader implements OptionSupport {
 
     private String key;
 
@@ -19,28 +19,16 @@ public class ExcelHeader {
 
     private CellDataType type;
 
+    private Options options = Options.of();
+
     public ExcelHeader(String key, String text, CellDataType type) {
         this.key = key;
         this.text = text;
         this.type = type;
     }
 
-    private Map<String, ExcelOption<?>> options;
-
-
-    public void option(ExcelOption<?> option) {
-        if (options == null) {
-            options = new HashMap<>();
-        }
-        options.put(option.getKey(), option);
+    @Override
+    public Options options() {
+        return options;
     }
-
-    @SuppressWarnings("unchecked")
-    public <T> Optional<ExcelOption<T>> getOption(OptionKey<T> key) {
-        return Optional.ofNullable(options)
-                .map(opts -> opts.get(key.getKey()))
-                .map(opt -> (ExcelOption<T>) opt);
-
-    }
-
 }

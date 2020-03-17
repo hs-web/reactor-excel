@@ -7,35 +7,38 @@ import org.hswebframework.reactor.excel.*;
 import java.util.Optional;
 
 @AllArgsConstructor
-public class SimpleWritableCell implements WritableCell {
+public class HeaderCell implements WritableCell, OptionSupport {
 
     @Getter
     private ExcelHeader header;
-
-    public Object value;
-
-    @Getter
-    private long rowIndex;
 
     @Getter
     private int columnIndex;
 
     @Getter
     private boolean end;
-
     @Override
     public int getSheetIndex() {
-        // TODO: 2020/3/17
+        return 0;
+    }
+
+    @Override
+    public long getRowIndex() {
         return 0;
     }
 
     @Override
     public Optional<Object> value() {
-        return Optional.ofNullable(value);
+        return Optional.of(header.getText());
     }
 
     @Override
     public CellDataType getType() {
-        return header.getType();
+        return CellDataType.STRING;
+    }
+
+    @Override
+    public Options options() {
+        return header.options();
     }
 }

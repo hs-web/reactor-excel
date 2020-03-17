@@ -11,6 +11,6 @@ public interface ExcelReader {
     String[] getSupportFormat();
 
     Flux<? extends Cell> read(InputStream inputStream,
-                              ExcelOption<?>... options);
+                              ExcelOption... options);
 
 }

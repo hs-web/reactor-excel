@@ -20,7 +20,7 @@ public class CsvReader implements ExcelReader {
 
     @Override
     @SneakyThrows
-    public Flux<CsvCell> read(InputStream inputStream, ExcelOption<?>... options) {
+    public Flux<CsvCell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
 

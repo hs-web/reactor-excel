@@ -15,7 +15,8 @@ class PoiExcelReaderTest {
     @Test
     void testXls() {
         ReactorExcel
-                .readAsMap(PoiExcelReaderTest.class.getResourceAsStream("/test.xls"), "xls")
+                .mapReader( "xls")
+                .read(PoiExcelReaderTest.class.getResourceAsStream("/test.xls"))
                 .as(StepVerifier::create)
                 .expectNext(
                         new LinkedHashMap<String, Object>() {{
@@ -32,7 +33,8 @@ class PoiExcelReaderTest {
     @Test
     void testXlsx() {
         ReactorExcel
-                .readAsMap(PoiExcelReaderTest.class.getResourceAsStream("/test.xlsx"), "xlsx")
+                .mapReader( "xlsx")
+                .read(PoiExcelReaderTest.class.getResourceAsStream("/test.xlsx"))
                 .as(StepVerifier::create)
                 .expectNext(
                         new LinkedHashMap<String, Object>() {{

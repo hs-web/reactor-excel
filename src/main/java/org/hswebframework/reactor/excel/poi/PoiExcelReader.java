@@ -18,7 +18,7 @@ public class PoiExcelReader implements ExcelReader {
     }
 
     @Override
-    public Flux<? extends Cell> read(InputStream inputStream, ExcelOption<?>... options) {
+    public Flux<? extends Cell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
             try {

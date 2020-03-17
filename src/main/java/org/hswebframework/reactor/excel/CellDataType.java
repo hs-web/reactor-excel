@@ -6,5 +6,6 @@ public enum CellDataType {
     DATE_TIME,
     NUMBER,
     BOOLEAN,
-    FORMULA;
+    FORMULA,
+    AUTO;
 }
