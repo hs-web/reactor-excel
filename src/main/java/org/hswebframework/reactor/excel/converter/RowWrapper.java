@@ -17,9 +17,9 @@ public abstract class RowWrapper<T> implements Function<Cell, Mono<T>> {
     @Setter
     protected int headerIndex;
 
-    volatile long currentRow;
+    protected volatile long currentRow;
 
-    Map<Integer, Cell> headerMapping = new HashMap<>();
+    protected Map<Integer, Cell> headerMapping = new HashMap<>();
 
     protected abstract T newInstance();
 

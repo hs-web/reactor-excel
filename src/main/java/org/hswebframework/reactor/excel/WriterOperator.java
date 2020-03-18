@@ -12,10 +12,7 @@ import reactor.core.publisher.Mono;
 
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Function;
 
 public class WriterOperator<T> {
@@ -60,6 +57,12 @@ public class WriterOperator<T> {
         expander.header(header);
         return this;
     }
+
+    public WriterOperator<T> headers(Collection<ExcelHeader> headers) {
+        expander.headers(headers);
+        return this;
+    }
+
 
     public WriterOperator<T> headers(Class<?> typeSpec) {
 

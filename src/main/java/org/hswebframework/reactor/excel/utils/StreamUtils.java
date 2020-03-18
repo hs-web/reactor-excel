@@ -47,6 +47,7 @@ public class StreamUtils {
                 }
             };
             sink.onDispose(streamConsumer.apply(stream)
+                    .doOnError(sink::error)
                     .subscriberContext(sink.currentContext())
                     .subscribe());
         });

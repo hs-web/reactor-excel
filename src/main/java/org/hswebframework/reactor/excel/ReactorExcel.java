@@ -58,6 +58,14 @@ public abstract class ReactorExcel {
         return writer;
     }
 
+    public static <T> Flux<T> read(InputStream input,
+                                   String format,
+                                   RowWrapper<T> wrapper) {
+        return lookupReader(format)
+                .read(input)
+                .flatMap(wrapper);
+    }
+
     public static ReaderOperator<Map<String, Object>> mapReader(String format) {
         return ReaderOperator.ofMap(lookupReader(format));
     }

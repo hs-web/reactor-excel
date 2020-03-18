@@ -7,6 +7,7 @@ import org.hswebframework.reactor.excel.WritableCell;
 import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiFunction;
@@ -26,6 +27,11 @@ public class MapRowExpander implements BiFunction<Long, Map<String, Object>, Flu
 
     public MapRowExpander header(ExcelHeader header) {
         headers.add(header);
+        return this;
+    }
+
+    public MapRowExpander headers(Collection<ExcelHeader> headers) {
+        this.headers.addAll(headers);
         return this;
     }
 
