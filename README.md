@@ -1,5 +1,8 @@
 # 基于Reactor的excel,csv导入导出
 
+[![Build Status](https://travis-ci.com/hs-web/reactor-excel.svg?branch=master)](https://travis-ci.com/hs-web/reactor-excel)
+[![codecov](https://codecov.io/gh/hs-web/reactor-excel/branch/master/graph/badge.svg)](https://codecov.io/gh/hs-web/reactor-excel)
+
 
 ```java
 ReactorExcel
