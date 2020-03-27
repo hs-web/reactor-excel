@@ -24,11 +24,12 @@ class PoiExcelWriterTest {
         ReactorExcel
                 .writer("xlsx")
                 .header("id", "ID")
-                .header("name", "name")
+                .header("name", "name").header("a","a")
                 .write(Flux.range(0, 10000)
                         .map(i -> new HashMap<String, Object>() {{
                             put("id", i);
                             put("name", "test" + i);
+                            put("a",null);
                         }}), new FileOutputStream("./target/test.xlsx"))
                 .as(StepVerifier::create)
                 .expectComplete()

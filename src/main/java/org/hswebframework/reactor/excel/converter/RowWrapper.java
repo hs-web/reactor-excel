@@ -39,7 +39,10 @@ public abstract class RowWrapper<T> implements Function<Cell, Mono<T>> {
             current = newInstance();
         }
         currentRow = cell.getRowIndex();
-        current = wrap(current, headerMapping.get(cell.getColumnIndex()), cell);
+        Cell header = headerMapping.get(cell.getColumnIndex());
+        if (header != null) {
+            current = wrap(current, header, cell);
+        }
         //新的一行
         if (cell.isEnd()) {
             Mono<T> result = Mono.justOrEmpty(current);

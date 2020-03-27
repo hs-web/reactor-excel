@@ -119,6 +119,7 @@ public class PoiExcelWriter implements ExcelWriter {
         Object val = cell.value().orElse(null);
         if (val == null) {
             poiCell.setBlank();
+            return;
         }
 
         switch (cell.getType()) {

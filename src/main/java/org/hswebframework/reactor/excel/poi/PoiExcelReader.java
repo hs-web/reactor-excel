@@ -14,7 +14,7 @@ import java.io.InputStream;
 public class PoiExcelReader implements ExcelReader {
     @Override
     public String[] getSupportFormat() {
-        return new String[]{"xls","xlsx"};
+        return new String[]{"xls", "xlsx"};
     }
 
     @Override
@@ -33,13 +33,24 @@ public class PoiExcelReader implements ExcelReader {
                     Row row = sheet.getRow(0);
                     int colNum = row.getPhysicalNumberOfCells();
                     for (int i = 0; i <= rowNum; i++) {
-                        if(sink.isCancelled()){
+                        if (sink.isCancelled()) {
                             return;
                         }
                         row = sheet.getRow(i);
                         if (row == null) continue;
+
                         for (int j = 0; j < colNum - 1; j++) {
-                            sink.next(new PoiCell(x, row.getCell(j), false));
+                            org.apache.poi.ss.usermodel.Cell cell = row.getCell(j);
+                            if (cell == null) {
+                                sink.next(new NullCell(x, i, j, false));
+                                continue;
+                            }
+                            sink.next(new PoiCell(x, cell, false));
+                        }
+                        org.apache.poi.ss.usermodel.Cell lastCell = row.getCell(colNum - 1);
+                        if (lastCell == null) {
+                            sink.next(new NullCell(x, i, colNum - 1, true));
+                            continue;
                         }
                         sink.next(new PoiCell(x, row.getCell(colNum - 1), true));
                     }
