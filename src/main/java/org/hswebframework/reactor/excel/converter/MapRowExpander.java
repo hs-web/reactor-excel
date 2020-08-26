@@ -1,6 +1,8 @@
 package org.hswebframework.reactor.excel.converter;
 
 import lombok.Getter;
+import org.apache.commons.beanutils.BeanUtilsBean;
+import org.apache.commons.beanutils.BeanUtilsBean2;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.ExcelHeader;
 import org.hswebframework.reactor.excel.WritableCell;
@@ -15,7 +17,7 @@ import java.util.function.BiFunction;
 public class MapRowExpander implements BiFunction<Long, Map<String, Object>, Flux<WritableCell>> {
 
     @Getter
-    private List<ExcelHeader> headers = new ArrayList<>();
+    private final List<ExcelHeader> headers = new ArrayList<>();
 
     public MapRowExpander header(String key, String header, CellDataType type) {
         return header(new ExcelHeader(key, header, type));
@@ -49,6 +51,16 @@ public class MapRowExpander implements BiFunction<Long, Map<String, Object>, Flu
     }
 
     protected Object getValue(String key, Map<String, Object> map) {
-        return map.get(key);
+        Object val = map.get(key);
+        if (val != null) {
+            return val;
+        }
+        if (key.contains(".") || key.contains("[")) {
+            try {
+                return BeanUtilsBean.getInstance().getPropertyUtils().getProperty(map, key);
+            } catch (Exception ignore) {
+            }
+        }
+        return null;
     }
 }
