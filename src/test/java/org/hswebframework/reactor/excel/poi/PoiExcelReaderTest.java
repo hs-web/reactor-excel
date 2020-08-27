@@ -40,10 +40,12 @@ class PoiExcelReaderTest {
                         new LinkedHashMap<String, Object>() {{
                             put("id", 1L);
                             put("name", "test");
+                            put("age", null);
                         }},
                         new LinkedHashMap<String, Object>() {{
                             put("id", 2L);
                             put("name", "test2");
+                            put("age", null);
                         }})
                 .verifyComplete();
     }
