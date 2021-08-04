@@ -109,7 +109,7 @@ public class PoiExcelWriter implements ExcelWriter {
                         wrapCell(poiCell, cell);
                         handleWriteOption(poiCell, cell, opts, cellOpts);
                     })
-                    .doFinally(s -> writeAndClose(workbook, outputStream))
+                    .then(Mono.fromRunnable(()-> writeAndClose(workbook, outputStream)))
                     .then();
         });
     }
