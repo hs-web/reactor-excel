@@ -43,4 +43,9 @@ public class CsvReader implements ExcelReader {
             }
         });
     }
+
+    @Override
+    public boolean isSupportMultiSheet() {
+        return false;
+    }
 }

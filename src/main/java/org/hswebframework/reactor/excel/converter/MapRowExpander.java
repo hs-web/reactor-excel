@@ -19,6 +19,16 @@ public class MapRowExpander implements BiFunction<Long, Map<String, Object>, Flu
     @Getter
     private final List<ExcelHeader> headers = new ArrayList<>();
 
+    private final int sheetIndex;
+
+    public MapRowExpander() {
+        this(0);
+    }
+
+    public MapRowExpander(int sheetIndex) {
+        this.sheetIndex = sheetIndex;
+    }
+
     public MapRowExpander header(String key, String header, CellDataType type) {
         return header(new ExcelHeader(key, header, type));
     }
@@ -37,17 +47,30 @@ public class MapRowExpander implements BiFunction<Long, Map<String, Object>, Flu
         return this;
     }
 
+    public Flux<WritableCell> headers(long rowIndex) {
+        return Flux.fromIterable(getHeaders())
+                   .index((index, header) -> WritableCell.of(sheetIndex,
+                                                             rowIndex,
+                                                             index.intValue(),
+                                                             header.getType(),
+                                                             header.getText(),
+                                                             index == getHeaders().size() - 1
+                                                             ));
+    }
+
     @Override
     public synchronized Flux<WritableCell> apply(Long rowIndex, Map<String, Object> val) {
         return Flux
                 .fromIterable(headers)
                 .index()
-                .map(header -> new SimpleWritableCell(
-                        header.getT2(),
-                        getValue(header.getT2().getKey(), val),
+                .map(header ->WritableCell.of(
+                        sheetIndex,
                         rowIndex,
                         header.getT1().intValue(),
-                        header.getT1().intValue() == headers.size() - 1));
+                        header.getT2().getType(),
+                        getValue(header.getT2().getKey(), val),
+                        header.getT1().intValue() == headers.size() - 1
+                        ));
     }
 
     protected Object getValue(String key, Map<String, Object> map) {

@@ -31,7 +31,7 @@ public class PoiExcelWriter implements ExcelWriter {
 
     @Override
     public String[] getSupportFormat() {
-        return new String[]{"xlsx"};
+        return new String[]{ExcelWriter.FORMAT_XLSX};
     }
 
     protected Workbook createWorkBook() {
@@ -153,5 +153,10 @@ public class PoiExcelWriter implements ExcelWriter {
                 break;
         }
 
+    }
+
+    @Override
+    public boolean isSupportMultiSheet() {
+        return true;
     }
 }

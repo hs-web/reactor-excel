@@ -6,8 +6,8 @@ import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.CellValue;
 import org.apache.poi.ss.usermodel.DateUtil;
 import org.apache.poi.ss.usermodel.FormulaEvaluator;
-import org.hswebframework.reactor.excel.Cell;
 import org.hswebframework.reactor.excel.CellDataType;
+import org.hswebframework.reactor.excel.BoundedCell;
 
 import java.math.BigDecimal;
 import java.util.Optional;
@@ -16,20 +16,20 @@ import static org.apache.poi.ss.usermodel.DateUtil.isADateFormat;
 
 @Getter
 @AllArgsConstructor
-public class PoiCell implements Cell {
+class PoiCell implements BoundedCell {
 
     private int sheetIndex;
 
     private org.apache.poi.ss.usermodel.Cell cell;
 
-    private boolean end;
+    private boolean endOfRow;
 
     private Object value;
 
-    public PoiCell(int sheetIndex, org.apache.poi.ss.usermodel.Cell cell, boolean end) {
+     PoiCell(int sheetIndex, org.apache.poi.ss.usermodel.Cell cell, boolean end) {
         this.sheetIndex = sheetIndex;
         this.cell = cell;
-        this.end = end;
+        this.endOfRow = end;
         this.value = convertValue();
     }
 
@@ -85,10 +85,14 @@ public class PoiCell implements Cell {
         return bDate;
     }
 
-
     @Override
     public int getSheetIndex() {
         return sheetIndex;
+    }
+
+    @Override
+    public String getSheetName() {
+        return cell.getSheet().getSheetName();
     }
 
     @Override
@@ -99,6 +103,21 @@ public class PoiCell implements Cell {
     @Override
     public int getColumnIndex() {
         return cell.getColumnIndex();
+    }
+
+    @Override
+    public int getNumberOfColumns() {
+        return cell.getRow().getPhysicalNumberOfCells();
+    }
+
+    @Override
+    public int getNumberOfSheets() {
+        return cell.getSheet().getWorkbook().getNumberOfSheets();
+    }
+
+    @Override
+    public int getNumberOfRows() {
+        return cell.getSheet().getPhysicalNumberOfRows();
     }
 
     @Override

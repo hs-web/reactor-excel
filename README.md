@@ -3,17 +3,16 @@
 [![Build Status](https://travis-ci.com/hs-web/reactor-excel.svg?branch=master)](https://travis-ci.com/hs-web/reactor-excel)
 [![codecov](https://codecov.io/gh/hs-web/reactor-excel/branch/master/graph/badge.svg)](https://codecov.io/gh/hs-web/reactor-excel)
 
-
 ```java
 ReactorExcel
-        .writer("csv")
-        .header("id", "ID")
-        .header("name", "name")
-        .write(Flux.range(0, 1000)
-                .map(i -> new HashMap<String, Object>() {{
-                    put("id", i);
-                    put("name", "test" + i);
-                }}), new FileOutputStream("./target/test.csv"))
+        .writeFor("csv")
+        .justWrite()
+        .sheet(spec->{
+            spec.header("id","ID")
+                .header("name","name")
+                .rows(datas)
+        })
+        .writeAndClose(new FileOutputStream("./target/test.csv"))
         .as(StepVerifier::create)
         .expectComplete()
         .verify();
@@ -22,10 +21,34 @@ ReactorExcel
 
 ```java
 
- ReactorExcel
-        .mapReader("csv")
-        .read(inputStream)
+ReactorExcel
+        .readToMap(inputStream,"csv")
         .as(StepVerifier::create)
         .subscribe(map->System.out.println(map));
 
+```
+
+多sheet写出
+
+```java
+ ReactorExcel
+        .xlsxWriter()
+        .sheet(sheet->{
+             sheet.name("S1")
+                  .header("id","ID")
+                  .header("name","姓名")
+                  .rows(dataFlux);
+        })
+        .sheet(sheet->{
+             sheet.cell(0,0,"Name")
+                  .cell(1,0,"Age")
+                  .cell(0,1,"Test")
+                  .cell(1,1,1)
+                  .option(sheet_->{//自定义sheet操作
+                     sheet_.addMergedRegion(CellRangeAddress.valueOf("A3:B3"));
+                     sheet_.addMergedRegion(CellRangeAddress.valueOf("C1:C3"));
+                    });
+        })
+        .writeAndClose(new FileOutputStream("./target/test.xlsx"))
+        .subscribe();
 ```

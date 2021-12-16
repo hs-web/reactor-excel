@@ -16,7 +16,8 @@ public class HeaderCell implements WritableCell, OptionSupport {
     private int columnIndex;
 
     @Getter
-    private boolean end;
+    private boolean endOfRow;
+
     @Override
     public int getSheetIndex() {
         return 0;

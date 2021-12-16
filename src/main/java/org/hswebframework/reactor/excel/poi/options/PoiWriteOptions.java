@@ -8,4 +8,7 @@ public interface PoiWriteOptions {
         return new ColumnWidthOption(columnIndex, width);
     }
 
+    static ExcelOption sheetName(int index, String name) {
+        return new NamedSheetOption(index, name);
+    }
 }

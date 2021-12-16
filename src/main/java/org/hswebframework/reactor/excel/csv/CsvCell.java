@@ -3,7 +3,7 @@ package org.hswebframework.reactor.excel.csv;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
-import org.hswebframework.reactor.excel.Cell;
+import org.hswebframework.reactor.excel.InSheetCell;
 import org.hswebframework.reactor.excel.CellDataType;
 
 import java.util.Optional;
@@ -11,7 +11,7 @@ import java.util.Optional;
 @Getter
 @Setter
 @AllArgsConstructor
-public class CsvCell implements Cell {
+public class CsvCell implements InSheetCell {
 
     private long rowIndex;
 
@@ -19,7 +19,8 @@ public class CsvCell implements Cell {
 
     private String value;
 
-    private boolean end;
+    private boolean endOfRow;
+
     @Override
     public int getSheetIndex() {
         return 0;

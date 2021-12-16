@@ -6,9 +6,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+@Deprecated
 public class MapWrapper extends RowWrapper<Map<String, Object>> {
 
-    private Map<String, String> headerMapping = new HashMap<>();
+    private final Map<String, String> headerMapping = new HashMap<>();
 
     public MapWrapper header(String header, String key) {
         headerMapping.put(header, key);

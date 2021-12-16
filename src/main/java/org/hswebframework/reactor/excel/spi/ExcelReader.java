@@ -13,4 +13,5 @@ public interface ExcelReader {
     Flux<? extends Cell> read(InputStream inputStream,
                               ExcelOption... options);
 
+    boolean isSupportMultiSheet();
 }

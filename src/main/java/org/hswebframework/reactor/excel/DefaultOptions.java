@@ -1,12 +1,13 @@
 package org.hswebframework.reactor.excel;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
 class DefaultOptions implements Options {
-    private List<ExcelOption> options = new ArrayList<>();
+    private final List<ExcelOption> options = new ArrayList<>();
 
     DefaultOptions(){
 
@@ -17,13 +18,13 @@ class DefaultOptions implements Options {
 
     @Override
     public List<ExcelOption> getOptions() {
-        return options;
+        return Collections.unmodifiableList(options);
     }
 
     public <T extends ExcelOption> List<T> getOptions(Class<T> type) {
         return options
                 .stream()
-                .filter(opt -> type.isAssignableFrom(opt.getType()))
+                .filter(opt -> opt.isWrapFor(type))
                 .map(opt -> opt.unwrap(type))
                 .collect(Collectors.toList());
     }
@@ -36,8 +37,7 @@ class DefaultOptions implements Options {
 
     @Override
     public Options merge(Options options) {
-        merge(options.getOptions());
-        return this;
+        return merge(options.getOptions());
     }
 
     public Options merge(List<ExcelOption> options) {

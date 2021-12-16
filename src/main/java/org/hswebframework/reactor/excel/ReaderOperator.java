@@ -10,13 +10,14 @@ import java.io.InputStream;
 import java.util.*;
 import java.util.function.Function;
 
+@Deprecated
 public class ReaderOperator<T> {
 
-    private ExcelReader reader;
+    private final ExcelReader reader;
 
-    private Class<T> targetType;
+    private final Class<T> targetType;
 
-    private MapWrapper wrapper = new MapWrapper();
+    private final MapWrapper wrapper = new MapWrapper();
 
     private Function<Map<String, Object>, T> converter = this::copy;
 
@@ -82,7 +83,7 @@ public class ReaderOperator<T> {
     public Flux<T> read(InputStream inputStream) {
         return reader
                 .read(inputStream, options.toArray(new ExcelOption[0]))
-                .flatMap(wrapper)
+                .as(wrapper::convert)
                 .map(converter);
     }
 

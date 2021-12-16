@@ -3,6 +3,7 @@ package org.hswebframework.reactor.excel.csv;
 import lombok.SneakyThrows;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
+import org.hswebframework.reactor.excel.Cell;
 import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.WritableCell;
 import org.hswebframework.reactor.excel.spi.ExcelWriter;
@@ -21,10 +22,10 @@ public class CsvWriter implements ExcelWriter {
     }
 
     @SneakyThrows
-    private void doWrite(CSVPrinter printer, WritableCell cell) {
+    private void doWrite(CSVPrinter printer, Cell cell) {
 
         printer.print(cell.valueAsText().orElse(""));
-        if (cell.isEnd()) {
+        if (cell.isEndOfRow()) {
             printer.println();
         }
     }
@@ -51,5 +52,10 @@ public class CsvWriter implements ExcelWriter {
             }
 
         });
+    }
+
+    @Override
+    public boolean isSupportMultiSheet() {
+        return false;
     }
 }

@@ -1,14 +1,17 @@
 package org.hswebframework.reactor.excel.utils;
 
+import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.io.BufferedOutputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.function.Function;
 
+@Slf4j
 public class StreamUtils {
 
     public static Flux<byte[]> buffer(int buffer, Function<OutputStream, Mono<Void>> streamConsumer) {
@@ -49,5 +52,13 @@ public class StreamUtils {
                     .subscriberContext(sink.currentContext())
                     .subscribe());
         });
+    }
+
+    public static void safeClose(Closeable closeable){
+        try{
+            closeable.close();
+        }catch (Throwable err){
+            log.warn(err.getMessage(),err);
+        }
     }
 }

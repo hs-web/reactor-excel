@@ -14,9 +14,9 @@ import java.util.function.Function;
 
 public class WriterOperator<T> {
 
-    ExcelWriter writer;
+    private final ExcelWriter writer;
 
-    private List<ExcelOption> options = new ArrayList<>();
+    private final List<ExcelOption> options = new ArrayList<>();
 
 
     static Function<Object, Map<String, Object>> defaultConverter;
@@ -27,7 +27,7 @@ public class WriterOperator<T> {
 
     private Function<T, Map<String, Object>> mapConverter = v -> defaultConverter.apply(v);
 
-    private MapRowExpander expander = new MapRowExpander();
+    private final MapRowExpander expander = new MapRowExpander();
 
     WriterOperator(ExcelWriter writer) {
         this.writer = writer;

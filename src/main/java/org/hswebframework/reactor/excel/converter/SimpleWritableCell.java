@@ -1,16 +1,16 @@
 package org.hswebframework.reactor.excel.converter;
 
-import lombok.AllArgsConstructor;
 import lombok.Getter;
-import org.hswebframework.reactor.excel.*;
+import org.hswebframework.reactor.excel.Cell;
+import org.hswebframework.reactor.excel.CellDataType;
+import org.hswebframework.reactor.excel.ExcelHeader;
+import org.hswebframework.reactor.excel.WritableCell;
 
 import java.util.Optional;
 
-@AllArgsConstructor
 public class SimpleWritableCell implements WritableCell {
 
-    @Getter
-    private ExcelHeader header;
+    private CellDataType type;
 
     public Object value;
 
@@ -21,13 +21,33 @@ public class SimpleWritableCell implements WritableCell {
     private int columnIndex;
 
     @Getter
-    private boolean end;
+    private boolean endOfRow;
 
-    @Override
-    public int getSheetIndex() {
-        // TODO: 2020/3/17
-        return 0;
+    @Getter
+    private int sheetIndex;
+
+    public SimpleWritableCell(ExcelHeader header, Object value, long rowIndex, int columnIndex, boolean endOfRow, int sheetIndex) {
+        this(header.getType(), value, rowIndex, columnIndex, endOfRow, sheetIndex);
     }
+
+    public SimpleWritableCell(CellDataType dataType, Object value, long rowIndex, int columnIndex, boolean endOfRow, int sheetIndex) {
+        this.type = dataType;
+        this.value = value;
+        this.rowIndex = rowIndex;
+        this.columnIndex = columnIndex;
+        this.endOfRow = endOfRow;
+        this.sheetIndex = sheetIndex;
+    }
+
+    public SimpleWritableCell(Cell cell, int sheetIndex) {
+        this(cell.getType(),
+             cell.value().orElse(null),
+             cell.getRowIndex(),
+             cell.getColumnIndex(),
+             cell.isEndOfRow(),
+             sheetIndex);
+    }
+
 
     @Override
     public Optional<Object> value() {
@@ -36,6 +56,6 @@ public class SimpleWritableCell implements WritableCell {
 
     @Override
     public CellDataType getType() {
-        return header.getType();
+        return type;
     }
 }

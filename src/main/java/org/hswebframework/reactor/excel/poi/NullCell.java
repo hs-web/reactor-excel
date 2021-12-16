@@ -2,27 +2,23 @@ package org.hswebframework.reactor.excel.poi;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
-import org.hswebframework.reactor.excel.Cell;
+import org.hswebframework.reactor.excel.BoundedCell;
+import org.hswebframework.reactor.excel.InSheetCell;
 import org.hswebframework.reactor.excel.CellDataType;
 
 import java.util.Optional;
 
 @AllArgsConstructor
-public class NullCell implements Cell {
+@Getter
+class NullCell implements BoundedCell {
 
-    @Getter
     private int sheetIndex;
-
-    @Getter
     private long rowIndex;
-
-    @Getter
     private int columnIndex;
-
-    @Getter
-    private boolean end;
-
-
+    private boolean endOfRow;
+    private int numberOfRows;
+    private int numberOfColumns;
+    private int numberOfSheets;
 
     @Override
     public Optional<Object> value() {

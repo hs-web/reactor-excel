@@ -13,8 +13,7 @@ class CsvReaderTest {
     void testCsvReader() {
 
         ReactorExcel
-                .mapReader( "csv")
-                .read(CsvReaderTest.class.getResourceAsStream("/test.csv"))
+                .readToMap(CsvReaderTest.class.getResourceAsStream("/test.csv"),"csv")
                 .as(StepVerifier::create)
                 .expectNext(
                         new HashMap<String, Object>() {{
@@ -28,5 +27,7 @@ class CsvReaderTest {
                 .verifyComplete();
 
     }
+
+
 
 }
