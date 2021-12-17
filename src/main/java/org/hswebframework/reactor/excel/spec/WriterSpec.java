@@ -18,22 +18,12 @@ import java.util.function.Consumer;
 public interface WriterSpec {
 
     /**
-     * 写出到输出流,此流不会自动关闭
+     * 写出到输出流,写出完成后流将被自动关闭
      *
      * @param output output
      * @return void
      */
     Mono<Void> write(OutputStream output);
-
-    /**
-     * 写出到输出流,然后关闭流
-     *
-     * @param output output
-     * @return void
-     */
-    default Mono<Void> writeAndClose(OutputStream output) {
-        return Mono.using(() -> output, this::write, StreamUtils::safeClose);
-    }
 
     /**
      * 写出到字节,并返回字节Flux流
@@ -54,7 +44,7 @@ public interface WriterSpec {
     WriterSpec option(ExcelOption... options);
 
 
-    static WriterSpecSelector writeFor(ExcelWriter writer){
+    static WriterSpecSelector writeFor(ExcelWriter writer) {
         return new DefaultWriterSepc(writer.isSupportMultiSheet() ? Integer.MAX_VALUE : 1, writer);
     }
 
@@ -78,7 +68,7 @@ public interface WriterSpec {
         return new DefaultWriterSepc(writer.isSupportMultiSheet() ? Integer.MAX_VALUE : 1, writer);
     }
 
-    interface WriterSpecSelector{
+    interface WriterSpecSelector {
 
         SheetWriterSpec justWrite();
 

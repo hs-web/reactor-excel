@@ -12,7 +12,7 @@ ReactorExcel
                 .header("name","name")
                 .rows(datas)
         })
-        .writeAndClose(new FileOutputStream("./target/test.csv"))
+        .write(new FileOutputStream("./target/test.csv"))
         .as(StepVerifier::create)
         .expectComplete()
         .verify();
@@ -49,6 +49,6 @@ ReactorExcel
                      sheet_.addMergedRegion(CellRangeAddress.valueOf("C1:C3"));
                     });
         })
-        .writeAndClose(new FileOutputStream("./target/test.xlsx"))
+        .write(new FileOutputStream("./target/test.xlsx"))
         .subscribe();
 ```

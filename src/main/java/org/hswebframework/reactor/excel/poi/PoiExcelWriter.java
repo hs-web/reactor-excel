@@ -23,6 +23,7 @@ import java.io.OutputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.function.Consumer;
 
@@ -87,6 +88,11 @@ public class PoiExcelWriter implements ExcelWriter {
             handleWriteOption(workbook, opts);
 
             return dataStream
+                    .sort(Comparator
+                                  .comparing(WritableCell::getSheetIndex)
+                                  .thenComparing(WritableCell::getRowIndex)
+                                  .thenComparing(WritableCell::getColumnIndex)
+                    )
                     .doOnNext(cell -> {
                         Sheet sheet;
                         Options cellOpts = cell instanceof OptionSupport ? ((OptionSupport) cell).options() : Options.empty();
@@ -109,7 +115,7 @@ public class PoiExcelWriter implements ExcelWriter {
                         wrapCell(poiCell, cell);
                         handleWriteOption(poiCell, cell, opts, cellOpts);
                     })
-                    .then(Mono.fromRunnable(()-> writeAndClose(workbook, outputStream)))
+                    .then(Mono.fromRunnable(() -> writeAndClose(workbook, outputStream)))
                     .then();
         });
     }

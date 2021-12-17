@@ -49,7 +49,7 @@ class CsvWriterTest {
                                     }})
                         );
                 })
-                .writeAndClose(new FileOutputStream("./target/test.csv"))
+                .write(new FileOutputStream("./target/test.csv"))
                 .as(StepVerifier::create)
                 .expectComplete()
                 .verify();
