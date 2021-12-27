@@ -4,6 +4,7 @@ import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
+import org.hswebframework.reactor.excel.BoundedCell;
 import org.hswebframework.reactor.excel.InSheetCell;
 import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.spi.ExcelReader;
@@ -18,7 +19,7 @@ public class PoiExcelReader implements ExcelReader {
     }
 
     @Override
-    public Flux<? extends InSheetCell> read(InputStream inputStream, ExcelOption... options) {
+    public Flux<BoundedCell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
             try {
