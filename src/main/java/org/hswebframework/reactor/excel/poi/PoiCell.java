@@ -2,10 +2,7 @@ package org.hswebframework.reactor.excel.poi;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
-import org.apache.poi.ss.usermodel.CellStyle;
-import org.apache.poi.ss.usermodel.CellValue;
-import org.apache.poi.ss.usermodel.DateUtil;
-import org.apache.poi.ss.usermodel.FormulaEvaluator;
+import org.apache.poi.ss.usermodel.*;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.BoundedCell;
 
@@ -26,7 +23,7 @@ class PoiCell implements BoundedCell {
 
     private Object value;
 
-     PoiCell(int sheetIndex, org.apache.poi.ss.usermodel.Cell cell, boolean end) {
+    PoiCell(int sheetIndex, org.apache.poi.ss.usermodel.Cell cell, boolean end) {
         this.sheetIndex = sheetIndex;
         this.cell = cell;
         this.endOfRow = end;
@@ -43,8 +40,7 @@ class PoiCell implements BoundedCell {
                 if (isCellDateFormatted()) {
                     return cell.getDateCellValue();
                 }
-                BigDecimal value = new BigDecimal(cell.getNumericCellValue());
-                return value.scale() == 0 ? value.longValue() : value;
+                return convertToNumber(cell);
             case STRING:
                 return cell.getRichStringCellValue().getString();
             case FORMULA:
@@ -57,8 +53,7 @@ class PoiCell implements BoundedCell {
                         if (isCellDateFormatted()) {
                             return cell.getDateCellValue();
                         }
-                        value = new BigDecimal(cell.getNumericCellValue());
-                        return value.scale() == 0 ? value.longValue() : value;
+                        return convertToNumber(cell);
                     case BLANK:
                         return "";
                     default:
@@ -67,6 +62,19 @@ class PoiCell implements BoundedCell {
             default:
                 return cell.getStringCellValue();
         }
+    }
+
+    private Number convertToNumber(Cell cell) {
+        BigDecimal value = new BigDecimal(cell.toString());
+        if (value.scale() == 0) {
+            return value.longValue();
+        }
+        //小数位为0时
+        BigDecimal[] result = value.divideAndRemainder(BigDecimal.ONE);
+        if (result[1].equals(BigDecimal.valueOf(0.0))) {
+            return value.longValue();
+        }
+        return value;
     }
 
     public boolean isCellDateFormatted() {

@@ -4,6 +4,7 @@ import org.hswebframework.reactor.excel.ReactorExcel;
 import org.junit.jupiter.api.Test;
 import reactor.test.StepVerifier;
 
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -26,6 +27,22 @@ class PoiExcelReaderTest {
                         new LinkedHashMap<String, Object>() {{
                             put("id", 2L);
                             put("name", "test2");
+                        }})
+                .verifyComplete();
+    }
+
+    @Test
+    void testNumber() {
+        ReactorExcel
+                .<Map<String, Object>>xlsxReader(LinkedHashMap::new)
+                .justRead()
+                .wrapper(ReactorExcel.cell(1, 2, (map, value) -> map.put("num", value)))
+                .oneInstanceAllSheets()
+                .read(PoiExcelReaderTest.class.getResourceAsStream("/simple.xlsx"))
+                .as(StepVerifier::create)
+                .expectNext(
+                        new LinkedHashMap<String, Object>() {{
+                            put("num", new BigDecimal("0.6"));
                         }})
                 .verifyComplete();
     }
