@@ -45,7 +45,7 @@
         <java.version>1.8</java.version>
         <project.build.jdk>${java.version}</project.build.jdk>
         <reactor.version>Dysprosium-SR20</reactor.version>
-        <apache.poi.version>4.1.2</apache.poi.version>
+        <apache.poi.version>5.2.1</apache.poi.version>
     </properties>
 
     <profiles>
