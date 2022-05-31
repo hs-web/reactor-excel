@@ -1,0 +1,2 @@
+属性ID,属性名称,数据类型,单位,精度,数据类型配置,是否只读,来源,属性说明,存储方式
+5230002,5230002,int,,,"{""unit"":""seconds"",""round"":""HALF_UP"",""type"":""int""}",TRUE,device,"int类型属性示例的说明,优先使用json数据类型配置，没有则使用简单模板，仅支持int double float long四种",ignore

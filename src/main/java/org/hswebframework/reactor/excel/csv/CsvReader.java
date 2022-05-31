@@ -10,6 +10,8 @@ import reactor.core.publisher.Flux;
 
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 
 public class CsvReader implements ExcelReader {
 
@@ -24,7 +26,9 @@ public class CsvReader implements ExcelReader {
 
         return Flux.create(sink -> {
 
-            try (CSVParser parser = CSVFormat.EXCEL.parse(new InputStreamReader(inputStream))) {
+            try (CSVParser parser = CSVFormat.EXCEL.parse(new InputStreamReader(
+                    inputStream,
+                    getCharset(options)))) {
                 int rowIndex = 0;
                 for (CSVRecord record : parser) {
                     if (sink.isCancelled()) {
@@ -42,6 +46,15 @@ public class CsvReader implements ExcelReader {
                 sink.error(err);
             }
         });
+    }
+
+    private Charset getCharset(ExcelOption... options) {
+        for (ExcelOption option : options) {
+            if (option.isWrapFor(CharsetOption.class)) {
+                return option.unwrap(CharsetOption.class).getCharset();
+            }
+        }
+        return StandardCharsets.UTF_8;
     }
 
     @Override

@@ -1,9 +1,12 @@
 package org.hswebframework.reactor.excel.csv;
 
+import lombok.SneakyThrows;
 import org.hswebframework.reactor.excel.ReactorExcel;
 import org.junit.jupiter.api.Test;
 import reactor.test.StepVerifier;
 
+import java.io.FileInputStream;
+import java.nio.charset.Charset;
 import java.util.HashMap;
 
 class CsvReaderTest {
@@ -24,6 +27,21 @@ class CsvReaderTest {
                             put("id", "2");
                             put("name", "test2");
                         }})
+                .verifyComplete();
+
+    }
+
+    @Test
+    @SneakyThrows
+    void testCsvReader2() {
+
+        ReactorExcel
+                .readToMap(CsvReaderTest.class.getResourceAsStream("/csv2.csv"),
+                           "csv",
+                           new CharsetOption(Charset.forName("gbk")))
+                .doOnNext(System.out::println)
+                .as(StepVerifier::create)
+                .expectNextCount(1)
                 .verifyComplete();
 
     }
