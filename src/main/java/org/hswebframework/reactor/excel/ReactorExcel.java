@@ -48,7 +48,7 @@ public abstract class ReactorExcel {
     public static ExcelReader lookupReader(String format) {
         ExcelReader reader = readers.get(format);
         if (reader == null) {
-            throw new UnsupportedOperationException("unsupported format:" + format);
+            throw new UnsupportedOperationException("error.unsupported_excel_format");
         }
         return reader;
     }
@@ -56,7 +56,7 @@ public abstract class ReactorExcel {
     public static ExcelWriter lookupWriter(String format) {
         ExcelWriter writer = writers.get(format);
         if (writer == null) {
-            throw new UnsupportedOperationException("unsupported format:" + format);
+            throw new UnsupportedOperationException("error.unsupported_excel_format");
         }
         return writer;
     }
