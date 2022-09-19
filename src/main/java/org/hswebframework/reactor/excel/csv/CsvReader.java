@@ -82,7 +82,7 @@ public class CsvReader implements ExcelReader {
         if (match != null) {
             Charset charset = Charset.forName(match.getName());
             //识别为了ISO_8859_1 ? 尝试转为GB18030
-            if (StandardCharsets.ISO_8859_1.equals(charset)) {
+            if (!StandardCharsets.UTF_8.equals(charset)) {
                 return DEFAULT_GB_CHARSET;
             }
         }
