@@ -6,7 +6,7 @@
 
     <groupId>org.hswebframework</groupId>
     <artifactId>reactor-excel</artifactId>
-    <version>1.0.3</version>
+    <version>1.0.4-SNAPSHOT</version>
 
     <name>JetLinks</name>
     <url>https://github.com/hs-web/reactor-excel</url>
@@ -291,6 +291,12 @@
             <artifactId>junit-jupiter</artifactId>
             <version>5.8.2</version>
             <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.ibm.icu</groupId>
+            <artifactId>icu4j</artifactId>
+            <version>71.1</version>
         </dependency>
 
     </dependencies>

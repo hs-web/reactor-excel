@@ -25,7 +25,7 @@ class CsvReaderTest {
                         }},
                         new HashMap<String, Object>() {{
                             put("id", "2");
-                            put("name", "test2");
+                            put("name", "中文");
                         }})
                 .verifyComplete();
 
