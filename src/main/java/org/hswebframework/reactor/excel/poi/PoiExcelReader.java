@@ -22,8 +22,7 @@ public class PoiExcelReader implements ExcelReader {
     public Flux<BoundedCell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
-            try {
-                Workbook wbs = WorkbookFactory.create(inputStream);
+            try (Workbook wbs = WorkbookFactory.create(inputStream)){
                 //获取sheets
                 int sheetSize = wbs.getNumberOfSheets();
                 for (int x = 0; x < sheetSize; x++) {

@@ -76,6 +76,11 @@ public class PoiExcelWriter implements ExcelWriter {
         }
     }
 
+    static Comparator<WritableCell> comparator = Comparator
+            .comparing(WritableCell::getSheetIndex)
+            .thenComparing(WritableCell::getRowIndex)
+            .thenComparing(WritableCell::getColumnIndex);
+
     @Override
     public Mono<Void> write(Flux<WritableCell> dataStream,
                             OutputStream outputStream,
@@ -88,11 +93,7 @@ public class PoiExcelWriter implements ExcelWriter {
             handleWriteOption(workbook, opts);
 
             return dataStream
-                    .sort(Comparator
-                                  .comparing(WritableCell::getSheetIndex)
-                                  .thenComparing(WritableCell::getRowIndex)
-                                  .thenComparing(WritableCell::getColumnIndex)
-                    )
+                    .sort(comparator)
                     .doOnNext(cell -> {
                         Sheet sheet;
                         Options cellOpts = cell instanceof OptionSupport ? ((OptionSupport) cell).options() : Options.empty();
