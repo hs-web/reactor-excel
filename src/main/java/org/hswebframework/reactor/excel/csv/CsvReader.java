@@ -70,21 +70,25 @@ public class CsvReader implements ExcelReader {
 
     @SneakyThrows
     protected Charset detectCharset(InputStream inputStream, ExcelOption... options) {
-        for (ExcelOption option : options) {
-            if (option.isWrapFor(CharsetOption.class)) {
-                return option.unwrap(CharsetOption.class).getCharset();
+        try {
+            for (ExcelOption option : options) {
+                if (option.isWrapFor(CharsetOption.class)) {
+                    return option.unwrap(CharsetOption.class).getCharset();
+                }
             }
-        }
-        CharsetDetector detector = new CharsetDetector();
-        detector.setText(inputStream);
+            CharsetDetector detector = new CharsetDetector();
+            detector.setText(inputStream);
 
-        CharsetMatch match = detector.detect();
-        if (match != null) {
-            Charset charset = Charset.forName(match.getName());
-            //识别为了ISO_8859_1 ? 尝试转为GB18030
-            if (!StandardCharsets.UTF_8.equals(charset)) {
-                return DEFAULT_GB_CHARSET;
+            CharsetMatch match = detector.detect();
+            if (match != null) {
+                Charset charset = Charset.forName(match.getName());
+                //识别为了ISO_8859_1 ? 尝试转为GB18030
+                if (!StandardCharsets.UTF_8.equals(charset)) {
+                    return DEFAULT_GB_CHARSET;
+                }
             }
+        } catch (Throwable ignore) {
+
         }
         return StandardCharsets.UTF_8;
     }
