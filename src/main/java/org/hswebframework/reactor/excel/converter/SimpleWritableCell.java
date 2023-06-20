@@ -1,30 +1,34 @@
 package org.hswebframework.reactor.excel.converter;
 
 import lombok.Getter;
-import org.hswebframework.reactor.excel.Cell;
-import org.hswebframework.reactor.excel.CellDataType;
-import org.hswebframework.reactor.excel.ExcelHeader;
-import org.hswebframework.reactor.excel.WritableCell;
+import org.hswebframework.reactor.excel.*;
 
 import java.util.Optional;
 
-public class SimpleWritableCell implements WritableCell {
+public class SimpleWritableCell implements WritableCell, OptionSupport {
 
-    private CellDataType type;
+    private final CellDataType type;
 
     public Object value;
 
     @Getter
-    private long rowIndex;
+    private final long rowIndex;
 
     @Getter
-    private int columnIndex;
+    private final int columnIndex;
 
     @Getter
-    private boolean endOfRow;
+    private final boolean endOfRow;
 
     @Getter
-    private int sheetIndex;
+    private final int sheetIndex;
+
+    private final Options options = Options.of();
+
+    @Override
+    public Options options() {
+        return options;
+    }
 
     public SimpleWritableCell(ExcelHeader header, Object value, long rowIndex, int columnIndex, boolean endOfRow, int sheetIndex) {
         this(header.getType(), value, rowIndex, columnIndex, endOfRow, sheetIndex);
@@ -46,6 +50,9 @@ public class SimpleWritableCell implements WritableCell {
              cell.getColumnIndex(),
              cell.isEndOfRow(),
              sheetIndex);
+        if (cell instanceof WritableCell) {
+            this.options().merge(((WritableCell) cell).options());
+        }
     }
 
 

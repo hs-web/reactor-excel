@@ -8,11 +8,13 @@ import org.apache.poi.ss.util.CellRangeAddress;
 import org.hswebframework.reactor.excel.ReactorExcel;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
+import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 
 import java.io.FileOutputStream;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 
 class PoiExcelWriterTest {
 
@@ -25,11 +27,13 @@ class PoiExcelWriterTest {
                 .header("id", "ID")
                 .header("name", "name").header("a", "a")
                 .write(Flux.range(0, 10000)
+                           .publishOn(Schedulers.boundedElastic())
                            .map(i -> new HashMap<String, Object>() {{
-                               put("id", i);
+                               put("id", ThreadLocalRandom.current().nextLong(Long.MAX_VALUE - 100000, Long.MAX_VALUE));
                                put("name", "test" + i);
                                put("a", null);
-                           }}), new FileOutputStream("./target/test.xlsx"))
+                           }})
+                        , new FileOutputStream("./target/test.xlsx"))
                 .as(StepVerifier::create)
                 .expectComplete()
                 .verify();
@@ -41,12 +45,13 @@ class PoiExcelWriterTest {
     @SneakyThrows
     void testWriteMultiSheet() {
 
-        Flux<Map<String, Object>> dataStream = Flux.range(0, 1000)
-                                                   .map(i -> new HashMap<String, Object>() {{
-                                                       put("id", i);
-                                                       put("name", "test" + i);
-                                                       put("a", null);
-                                                   }});
+        Flux<Map<String, Object>> dataStream = Flux
+                .range(0, 1000000)
+                .map(i -> new HashMap<String, Object>() {{
+                    put("id", i);
+                    put("name", "test" + i);
+                    put("a", null);
+                }});
 
         ReactorExcel
                 .xlsxWriter()

@@ -102,7 +102,7 @@ public class WriterOperator<T> {
                 Flux.fromIterable(expander.getHeaders())
                         .index((index, header) -> new HeaderCell(header, index.intValue(), index == expander.getHeaders().size() - 1)),
                 dataStream.index()
-                        .flatMap((idx) -> expander.apply(idx.getT1() + 1, toMap(idx.getT2()))))
+                        .concatMap((idx) -> expander.apply(idx.getT1() + 1, toMap(idx.getT2()))))
                 .as(flux -> writer.write(flux, output, options.toArray(new ExcelOption[0])));
 
     }

@@ -3,10 +3,12 @@ package org.hswebframework.reactor.excel.poi;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.BoundedCell;
 
 import java.math.BigDecimal;
+import java.util.Date;
 import java.util.Optional;
 
 import static org.apache.poi.ss.usermodel.DateUtil.isADateFormat;
@@ -38,7 +40,12 @@ class PoiCell implements BoundedCell {
                 return cell.getBooleanCellValue();
             case NUMERIC:
                 if (isCellDateFormatted()) {
-                    return cell.getDateCellValue();
+                    Date date = cell.getDateCellValue();
+                    if (date.getTime() > 0) {
+                        return date;
+                    }else {
+                        return cell.getNumericCellValue();
+                    }
                 }
                 return convertToNumber(cell);
             case STRING:
@@ -48,12 +55,21 @@ class PoiCell implements BoundedCell {
                 CellValue cellValue = evaluator.evaluate(cell);
                 switch (cellValue.getCellType()) {
                     case BOOLEAN:
-                        return cell.getBooleanCellValue();
+                        return cellValue.getBooleanValue();
                     case NUMERIC:
                         if (isCellDateFormatted()) {
-                            return cell.getDateCellValue();
+                            Workbook workbook = cell.getRow().getSheet().getWorkbook();
+                            if (workbook instanceof XSSFWorkbook) {
+                                Date date = DateUtil.getJavaDate(
+                                        cellValue.getNumberValue(),
+                                        ((XSSFWorkbook) workbook).isDate1904());
+                                if (date.getTime() > 0) {
+                                    return date;
+                                }
+                            }
+                            return cellValue.getNumberValue();
                         }
-                        return convertToNumber(cell);
+                        return cellValue.getNumberValue();
                     case BLANK:
                         return "";
                     default:

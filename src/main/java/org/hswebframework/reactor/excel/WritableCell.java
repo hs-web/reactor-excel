@@ -2,7 +2,7 @@ package org.hswebframework.reactor.excel;
 
 import org.hswebframework.reactor.excel.converter.SimpleWritableCell;
 
-public interface WritableCell extends InSheetCell {
+public interface WritableCell extends InSheetCell,OptionSupport {
 
 
     static WritableCell of(int sheetIndex,

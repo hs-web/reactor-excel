@@ -93,10 +93,10 @@ public class PoiExcelWriter implements ExcelWriter {
             handleWriteOption(workbook, opts);
 
             return dataStream
-                    .sort(comparator)
+//                     .sort(comparator)
                     .doOnNext(cell -> {
                         Sheet sheet;
-                        Options cellOpts = cell instanceof OptionSupport ? ((OptionSupport) cell).options() : Options.empty();
+                        Options cellOpts = cell.options();
                         try {
                             sheet = workbook.getSheetAt(cell.getSheetIndex());
                         } catch (IllegalArgumentException e) {
@@ -116,7 +116,7 @@ public class PoiExcelWriter implements ExcelWriter {
                         wrapCell(poiCell, cell);
                         handleWriteOption(poiCell, cell, opts, cellOpts);
                     })
-                    .then(Mono.fromRunnable(() -> writeAndClose(workbook, outputStream)))
+                    .doAfterTerminate(() -> writeAndClose(workbook, outputStream))
                     .then();
         });
     }
@@ -136,12 +136,13 @@ public class PoiExcelWriter implements ExcelWriter {
             case NUMBER:
                 if (val instanceof Number) {
                     poiCell.setCellValue(((Number) val).doubleValue());
+                    break;
                 }
                 poiCell.setCellValue(String.valueOf(val));
                 break;
             case DATE_TIME:
                 if (val instanceof Long) {
-                    val = new Date();
+                    val = new Date((Long) val);
                 }
                 if (val instanceof Date) {
                     poiCell.setCellValue((Date) val);

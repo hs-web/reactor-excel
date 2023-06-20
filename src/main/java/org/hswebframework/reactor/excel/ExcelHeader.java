@@ -7,6 +7,7 @@ import lombok.Setter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 @Getter
 @Setter
@@ -25,6 +26,11 @@ public class ExcelHeader implements OptionSupport {
         this.key = key;
         this.text = text;
         this.type = type;
+    }
+
+    public ExcelHeader options(Consumer<Options> optionsConsumer){
+        optionsConsumer.accept(options);
+        return this;
     }
 
     @Override

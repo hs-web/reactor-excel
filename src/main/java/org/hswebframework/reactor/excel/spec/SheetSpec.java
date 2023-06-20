@@ -5,6 +5,7 @@ import org.hswebframework.reactor.excel.ExcelHeader;
 import org.hswebframework.reactor.excel.poi.options.SheetOption;
 import reactor.core.publisher.Flux;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -64,7 +65,7 @@ public interface SheetSpec {
         CellSheetSpec cell(Cell cell);
 
         default CellSheetSpec cells(Cell... cells) {
-            return cells(Flux.fromArray(cells));
+            return cells(Arrays.asList(cells));
         }
 
         default CellSheetSpec cells(Iterable<Cell> cells) {

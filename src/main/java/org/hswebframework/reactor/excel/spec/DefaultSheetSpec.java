@@ -16,6 +16,8 @@ class DefaultSheetSpec implements SheetSpec.HeaderSheetSpec, SheetSpec {
     private long firstRowIndex = 0;
     private Flux<Cell> cells = Flux.empty();
 
+    private final List<Cell> fixedCells = new ArrayList<>();
+
     private Flux<Map<String, Object>> rows = Flux.empty();
 
     private final List<SheetOption> options = new ArrayList<>();
@@ -34,8 +36,17 @@ class DefaultSheetSpec implements SheetSpec.HeaderSheetSpec, SheetSpec {
     }
 
     @Override
+    public CellSheetSpec cells(Iterable<Cell> cells) {
+        for (Cell cell : cells) {
+            fixedCells.add(cell);
+        }
+        return this;
+    }
+
+    @Override
     public CellSheetSpec cell(Cell cell) {
-        return cells(Flux.just(cell));
+        fixedCells.add(cell);
+        return this;
     }
 
     @Override
@@ -88,9 +99,12 @@ class DefaultSheetSpec implements SheetSpec.HeaderSheetSpec, SheetSpec {
     }
 
     Flux<Cell> cells() {
+        fixedCells.sort(Comparator.comparingLong(Cell::getRowIndex));
+
         return Flux.concat(
                 expander.headers(firstRowIndex),
-                rows.index().flatMap((idx) -> expander.apply(idx.getT1() + firstRowIndex + 1, idx.getT2())),
+                Flux.fromIterable(fixedCells),
+                rows.index().concatMap((idx) -> expander.apply(idx.getT1() + firstRowIndex + 1, idx.getT2())),
                 cells);
     }
 

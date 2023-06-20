@@ -48,29 +48,38 @@ public class MapRowExpander implements BiFunction<Long, Map<String, Object>, Flu
     }
 
     public Flux<WritableCell> headers(long rowIndex) {
-        return Flux.fromIterable(getHeaders())
-                   .index((index, header) -> WritableCell.of(sheetIndex,
-                                                             rowIndex,
-                                                             index.intValue(),
-                                                             header.getType(),
-                                                             header.getText(),
-                                                             index == getHeaders().size() - 1
-                                                             ));
+        return Flux
+                .fromIterable(getHeaders())
+                .index((index, header) -> {
+                    WritableCell cell = WritableCell
+                            .of(sheetIndex,
+                                rowIndex,
+                                index.intValue(),
+                                header.getType(),
+                                header.getText(),
+                                index == getHeaders().size() - 1
+                            );
+                    cell.options().merge(header.options());
+                    return cell;
+                });
     }
 
     @Override
-    public synchronized Flux<WritableCell> apply(Long rowIndex, Map<String, Object> val) {
+    public Flux<WritableCell> apply(Long rowIndex, Map<String, Object> val) {
         return Flux
                 .fromIterable(headers)
-                .index()
-                .map(header ->WritableCell.of(
-                        sheetIndex,
-                        rowIndex,
-                        header.getT1().intValue(),
-                        header.getT2().getType(),
-                        getValue(header.getT2().getKey(), val),
-                        header.getT1().intValue() == headers.size() - 1
-                        ));
+                .index((index, header) -> {
+                    WritableCell cell = WritableCell.of(
+                            sheetIndex,
+                            rowIndex,
+                            index.intValue(),
+                            header.getType(),
+                            getValue(header.getKey(), val),
+                            index == headers.size() - 1
+                    );
+                    cell.options().merge(header.options());
+                    return cell;
+                });
     }
 
     protected Object getValue(String key, Map<String, Object> map) {

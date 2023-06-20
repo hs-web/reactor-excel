@@ -1,6 +1,7 @@
 package org.hswebframework.reactor.excel.csv;
 
 import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
 import org.hswebframework.reactor.excel.Cell;
@@ -14,6 +15,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 
+@Slf4j
 public class CsvWriter implements ExcelWriter {
 
     @Override
@@ -30,9 +32,12 @@ public class CsvWriter implements ExcelWriter {
         }
     }
 
-    @SneakyThrows
     private void closePrinter(CSVPrinter printer) {
-        printer.close();
+        try {
+            printer.close();
+        } catch (Throwable err) {
+            log.warn("close CSVPrinter error", err);
+        }
     }
 
     @Override
@@ -46,7 +51,8 @@ public class CsvWriter implements ExcelWriter {
                 CSVPrinter printer = new CSVPrinter(new OutputStreamWriter(outputStream), CSVFormat.EXCEL);
                 return dataStream
                         .doOnNext(cell -> doWrite(printer, cell))
-                        .then(Mono.fromRunnable(()-> closePrinter(printer)));
+                        .doAfterTerminate(() -> closePrinter(printer))
+                        .then();
             } catch (IOException e) {
                 return Mono.error(e);
             }
