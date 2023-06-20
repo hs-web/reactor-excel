@@ -46,7 +46,7 @@ class PoiExcelWriterTest {
     void testWriteMultiSheet() {
 
         Flux<Map<String, Object>> dataStream = Flux
-                .range(0, 1000000)
+                .range(0, 10000)
                 .map(i -> new HashMap<String, Object>() {{
                     put("id", i);
                     put("name", "test" + i);

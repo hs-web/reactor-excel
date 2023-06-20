@@ -3,6 +3,7 @@ package org.hswebframework.reactor.excel.utils;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.context.Context;
 
 import java.io.BufferedOutputStream;
 import java.io.Closeable;
@@ -47,18 +48,23 @@ public class StreamUtils {
                     }
                 }
             };
-            sink.onDispose(streamConsumer.apply(stream)
-                    .doOnError(sink::error)
-                    .subscriberContext(sink.currentContext())
-                    .subscribe());
+            sink.onDispose(
+                    streamConsumer
+                            .apply(stream)
+                            .subscribe(ignore -> {
+                                       },
+                                       sink::error,
+                                       () -> {
+                                       },
+                                       Context.of(sink.contextView())));
         });
     }
 
-    public static void safeClose(Closeable closeable){
-        try{
+    public static void safeClose(Closeable closeable) {
+        try {
             closeable.close();
-        }catch (Throwable err){
-            log.warn(err.getMessage(),err);
+        } catch (Throwable err) {
+            log.warn(err.getMessage(), err);
         }
     }
 }
