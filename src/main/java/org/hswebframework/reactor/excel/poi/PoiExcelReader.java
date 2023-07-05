@@ -22,23 +22,25 @@ public class PoiExcelReader implements ExcelReader {
     public Flux<BoundedCell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
-            try (Workbook wbs = WorkbookFactory.create(inputStream)){
+            try (Workbook wbs = WorkbookFactory.create(inputStream)) {
                 //获取sheets
                 int sheetSize = wbs.getNumberOfSheets();
+                A:
                 for (int x = 0; x < sheetSize; x++) {
                     Sheet sheet = wbs.getSheetAt(x);
                     // 得到总行数
-                    int rowNum = sheet.getLastRowNum();
+                    int rowNum = sheet.getPhysicalNumberOfRows();
                     if (rowNum <= 0) continue;
                     Row row = sheet.getRow(0);
                     int colNum = row.getPhysicalNumberOfCells();
                     for (int i = 0; i <= rowNum; i++) {
                         if (sink.isCancelled()) {
-                            return;
+                            break A;
                         }
                         row = sheet.getRow(i);
-                        if (row == null) continue;
-
+                        if (row == null) {
+                            continue;
+                        }
                         for (int j = 0; j < colNum - 1; j++) {
                             org.apache.poi.ss.usermodel.Cell cell = row.getCell(j);
                             if (cell == null) {

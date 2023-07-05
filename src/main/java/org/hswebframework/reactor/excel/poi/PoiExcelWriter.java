@@ -116,7 +116,7 @@ public class PoiExcelWriter implements ExcelWriter {
                         wrapCell(poiCell, cell);
                         handleWriteOption(poiCell, cell, opts, cellOpts);
                     })
-                    .doAfterTerminate(() -> writeAndClose(workbook, outputStream))
+                    .doFinally((s) -> writeAndClose(workbook, outputStream))
                     .then();
         });
     }

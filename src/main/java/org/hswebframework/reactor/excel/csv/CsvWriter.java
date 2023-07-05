@@ -51,7 +51,7 @@ public class CsvWriter implements ExcelWriter {
                 CSVPrinter printer = new CSVPrinter(new OutputStreamWriter(outputStream), CSVFormat.EXCEL);
                 return dataStream
                         .doOnNext(cell -> doWrite(printer, cell))
-                        .doAfterTerminate(() -> closePrinter(printer))
+                        .doFinally((f) -> closePrinter(printer))
                         .then();
             } catch (IOException e) {
                 return Mono.error(e);
