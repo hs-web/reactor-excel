@@ -45,9 +45,11 @@ public class CsvWriter implements ExcelWriter {
                             OutputStream outputStream,
                             ExcelOption... options) {
 
+        byte[] BOM = "\ufeff".getBytes();
 
         return Mono.defer(() -> {
             try {
+                outputStream.write(BOM);
                 CSVPrinter printer = new CSVPrinter(new OutputStreamWriter(outputStream), CSVFormat.EXCEL);
                 return dataStream
                         .doOnNext(cell -> doWrite(printer, cell))
