@@ -10,6 +10,7 @@ import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.spi.ExcelReader;
 import reactor.core.publisher.Flux;
 
+import java.io.BufferedInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
@@ -29,7 +30,9 @@ public class CsvReader implements ExcelReader {
         String[] charsets = new String[]{"GB18030", "GBK", "GB2312"};
         for (String charset : charsets) {
             try {
-                temp = Charset.forName(charset);
+                if (Charset.isSupported(charset)) {
+                    temp = Charset.forName(charset);
+                }
             } catch (Throwable ignore) {
             }
             if (temp != null) {
@@ -39,15 +42,23 @@ public class CsvReader implements ExcelReader {
         DEFAULT_GB_CHARSET = temp;
     }
 
+    private InputStream transformInputStream(InputStream stream) {
+        if (stream instanceof BufferedInputStream) {
+            return stream;
+        }
+        return new BufferedInputStream(stream);
+    }
+
     @Override
     @SneakyThrows
     public Flux<CsvCell> read(InputStream inputStream, ExcelOption... options) {
 
         return Flux.create(sink -> {
 
+            InputStream buffered = transformInputStream(inputStream);
             try (CSVParser parser = CSVFormat.EXCEL.parse(new InputStreamReader(
-                    inputStream,
-                    detectCharset(inputStream, options)))) {
+                    buffered,
+                    detectCharset(buffered, options)))) {
 
                 int rowIndex = 0;
                 for (CSVRecord record : parser) {
