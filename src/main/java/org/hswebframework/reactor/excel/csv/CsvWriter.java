@@ -17,7 +17,7 @@ import java.io.OutputStreamWriter;
 
 @Slf4j
 public class CsvWriter implements ExcelWriter {
-
+    static byte[] BOM = "\ufeff".getBytes();
     @Override
     public String[] getSupportFormat() {
         return new String[]{"csv"};
@@ -44,8 +44,6 @@ public class CsvWriter implements ExcelWriter {
     public Mono<Void> write(Flux<WritableCell> dataStream,
                             OutputStream outputStream,
                             ExcelOption... options) {
-
-        byte[] BOM = "\ufeff".getBytes();
 
         return Mono.defer(() -> {
             try {
