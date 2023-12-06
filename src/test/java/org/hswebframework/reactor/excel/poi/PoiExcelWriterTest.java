@@ -6,15 +6,21 @@ import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellRangeAddress;
 import org.hswebframework.reactor.excel.ReactorExcel;
+import org.hswebframework.reactor.excel.poi.options.AddNormalPullDownSheetOption;
+import org.hswebframework.reactor.excel.poi.options.PoiWriteOptions;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 
-import java.io.FileOutputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 class PoiExcelWriterTest {
 
@@ -33,7 +39,7 @@ class PoiExcelWriterTest {
                                put("name", "test" + i);
                                put("a", null);
                            }})
-                        , new FileOutputStream("./target/test.xlsx"))
+                        , Files.newOutputStream(Paths.get("./target/test.xlsx")))
                 .as(StepVerifier::create)
                 .expectComplete()
                 .verify();
@@ -88,7 +94,33 @@ class PoiExcelWriterTest {
                             sheet.addMergedRegion(CellRangeAddress.valueOf("A3:B3"));
                             sheet.addMergedRegion(CellRangeAddress.valueOf("C1:C3"));
                         }))
-                .write(new FileOutputStream("./target/test.xlsx"))
+                .write(Files.newOutputStream(Paths.get("./target/test.xlsx")))
+                .as(StepVerifier::create)
+                .expectComplete()
+                .verify();
+
+        Thread.sleep(1000);
+    }
+
+    @Test
+    @SneakyThrows
+    void testAddValidation() {
+
+        List<String> collect = IntStream
+                .range(0, 1000)
+                .boxed()
+                .map(String::valueOf)
+                .collect(Collectors.toList());
+
+
+        ReactorExcel
+                .writer("xlsx")
+                .header("id", "ID")
+                .header("name", "名称")
+                .options(PoiWriteOptions
+                                 .addNormalPullDownSheet(0, 1, AddNormalPullDownSheetOption.MAX_ROW, 1, 1, collect.toArray(new String[0])))
+                .write(Flux.empty()
+                        , Files.newOutputStream(Paths.get("./target/addValidation.xlsx")))
                 .as(StepVerifier::create)
                 .expectComplete()
                 .verify();
