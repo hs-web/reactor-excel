@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 class DefaultOptions implements Options {
@@ -22,11 +23,18 @@ class DefaultOptions implements Options {
     }
 
     public <T extends ExcelOption> List<T> getOptions(Class<T> type) {
-        return options
-                .stream()
-                .filter(opt -> opt.isWrapFor(type))
-                .map(opt -> opt.unwrap(type))
-                .collect(Collectors.toList());
+        List<T> opts = new ArrayList<>();
+        handleOptions(type,opts::add);
+        return opts;
+    }
+
+    @Override
+    public <T extends ExcelOption> void handleOptions(Class<T> type, Consumer<T> consumer) {
+        for (ExcelOption option : options) {
+            if(option.isWrapFor(type)){
+                consumer.accept(option.unwrap(type));
+            }
+        }
     }
 
     @Override

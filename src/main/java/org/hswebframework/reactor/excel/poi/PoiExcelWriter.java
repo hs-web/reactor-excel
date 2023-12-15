@@ -7,10 +7,8 @@ import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
-import org.hswebframework.reactor.excel.ExcelOption;
-import org.hswebframework.reactor.excel.OptionSupport;
-import org.hswebframework.reactor.excel.Options;
-import org.hswebframework.reactor.excel.WritableCell;
+import org.hswebframework.reactor.excel.*;
+import org.hswebframework.reactor.excel.context.Context;
 import org.hswebframework.reactor.excel.poi.options.CellOption;
 import org.hswebframework.reactor.excel.poi.options.RowOption;
 import org.hswebframework.reactor.excel.poi.options.SheetOption;
@@ -25,7 +23,6 @@ import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
-import java.util.function.Consumer;
 
 @Slf4j
 public class PoiExcelWriter implements ExcelWriter {
@@ -52,27 +49,27 @@ public class PoiExcelWriter implements ExcelWriter {
         }
     }
 
-    private void handleWriteOption(Workbook workbook, Options... options) {
+    private void handleWriteOption(Workbook workbook, Context context, Options... options) {
         for (Options opts : options) {
-            opts.handleOptions(WorkbookOption.class, opt -> opt.workbook(workbook));
+            opts.handleOptions(WorkbookOption.class, opt -> opt.workbook(workbook, context));
         }
     }
 
-    private void handleWriteOption(Sheet sheet, Options... options) {
+    private void handleWriteOption(Sheet sheet, Context context, Options... options) {
         for (Options opts : options) {
-            opts.handleOptions(SheetOption.class, opt -> opt.sheet(sheet));
+            opts.handleOptions(SheetOption.class, opt -> opt.sheet(sheet, context));
         }
     }
 
-    private void handleWriteOption(Row row, Options... options) {
+    private void handleWriteOption(Row row, Context context, Options... options) {
         for (Options opts : options) {
-            opts.handleOptions(RowOption.class, opt -> opt.row(row));
+            opts.handleOptions(RowOption.class, opt -> opt.row(row, context));
         }
     }
 
-    private void handleWriteOption(Cell poiCell, WritableCell cell, Options... options) {
+    private void handleWriteOption(Cell poiCell, WritableCell cell, Context context, Options... options) {
         for (Options opts : options) {
-            opts.handleOptions(CellOption.class, opt -> opt.cell(poiCell, cell));
+            opts.handleOptions(CellOption.class, opt -> opt.cell(poiCell, cell, context));
         }
     }
 
@@ -85,15 +82,14 @@ public class PoiExcelWriter implements ExcelWriter {
     public Mono<Void> write(Flux<WritableCell> dataStream,
                             OutputStream outputStream,
                             ExcelOption... options) {
-
+        Context context = Context.create();
         return Mono.defer(() -> {
             Options opts = options.length > 0 ? Options.of(Arrays.asList(options)) : Options.empty();
 
             Workbook workbook = createWorkBook();
-            handleWriteOption(workbook, opts);
+            handleWriteOption(workbook, context, opts);
 
             return dataStream
-//                     .sort(comparator)
                     .doOnNext(cell -> {
                         Sheet sheet;
                         Options cellOpts = cell.options();
@@ -101,20 +97,20 @@ public class PoiExcelWriter implements ExcelWriter {
                             sheet = workbook.getSheetAt(cell.getSheetIndex());
                         } catch (IllegalArgumentException e) {
                             sheet = workbook.createSheet();
-                            handleWriteOption(sheet, opts, cellOpts);
+                            handleWriteOption(sheet, context, opts, cellOpts);
                         }
                         int rowIndex = (int) cell.getRowIndex();
                         Row row = sheet.getRow(rowIndex);
                         if (row == null) {
                             row = sheet.createRow(rowIndex);
-                            handleWriteOption(row, opts, cellOpts);
+                            handleWriteOption(row, context, opts, cellOpts);
                         }
                         Cell poiCell = row.getCell(cell.getColumnIndex());
                         if (poiCell == null) {
                             poiCell = row.createCell(cell.getColumnIndex());
                         }
                         wrapCell(poiCell, cell);
-                        handleWriteOption(poiCell, cell, opts, cellOpts);
+                        handleWriteOption(poiCell, cell, context, opts, cellOpts);
                     })
                     .doFinally((s) -> writeAndClose(workbook, outputStream))
                     .then();

@@ -1,8 +1,10 @@
 package org.hswebframework.reactor.excel.spec;
 
 import lombok.AllArgsConstructor;
+import org.apache.poi.ss.usermodel.Sheet;
 import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.WritableCell;
+import org.hswebframework.reactor.excel.context.Context;
 import org.hswebframework.reactor.excel.poi.options.PoiWriteOptions;
 import org.hswebframework.reactor.excel.poi.options.SheetOption;
 import org.hswebframework.reactor.excel.spi.ExcelWriter;
@@ -60,7 +62,7 @@ class DefaultWriterSepc implements WriterSpec.MultiSheetWriterSpec, WriterSpec.W
         this.cells.put(index, sheetSpec.cells()
                                        .map(cell -> WritableCell.of(cell, index)));
 
-        if (null != sheetSpec.getName() && sheetSpec.getName().length() > 0) {
+        if (null != sheetSpec.getName() && !sheetSpec.getName().isEmpty()) {
             option(PoiWriteOptions.sheetName(index, sheetSpec.getName()));
         }
         addSheetOption(index, sheetSpec.getOptions());
@@ -74,14 +76,27 @@ class DefaultWriterSepc implements WriterSpec.MultiSheetWriterSpec, WriterSpec.W
     }
 
     private void addSheetOption(int index, Collection<SheetOption> options) {
-        this.options.add(SheetOption.of(sheet -> {
-            //只处理相同sheet的操作
-            if (sheet.getWorkbook().getSheetIndex(sheet) == index) {
-                for (SheetOption option : options) {
-                    option.sheet(sheet);
+        this.options.add(new SheetOption() {
+            @Override
+            public void sheet(Sheet sheet) {
+                //只处理相同sheet的操作
+                if (sheet.getWorkbook().getSheetIndex(sheet) == index) {
+                    for (SheetOption option : options) {
+                        option.sheet(sheet);
+                    }
                 }
             }
-        }));
+
+            @Override
+            public void sheet(Sheet sheet, Context context) {
+                //只处理相同sheet的操作
+                if (sheet.getWorkbook().getSheetIndex(sheet) == index) {
+                    for (SheetOption option : options) {
+                        option.sheet(sheet, context);
+                    }
+                }
+            }
+        });
     }
 
     private void checkSheetSize() {
