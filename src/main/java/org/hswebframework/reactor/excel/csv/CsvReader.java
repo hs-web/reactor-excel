@@ -6,6 +6,8 @@ import lombok.SneakyThrows;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
+import org.apache.commons.io.ByteOrderMark;
+import org.apache.commons.io.input.BOMInputStream;
 import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.spi.ExcelReader;
 import reactor.core.publisher.Flux;
@@ -67,9 +69,9 @@ public class CsvReader implements ExcelReader {
                     }
                     int last = record.size() - 1;
                     for (int i = 0; i < last; i++) {
-                        sink.next(new CsvCell(rowIndex, i, record.get(i), false));
+                        sink.next(new CsvCell(rowIndex, i, getText(record.get(i)), false));
                     }
-                    sink.next(new CsvCell(rowIndex, last, record.get(last), true));
+                    sink.next(new CsvCell(rowIndex, last, getText(record.get(last)), true));
                     rowIndex++;
                 }
                 sink.complete();
@@ -77,6 +79,20 @@ public class CsvReader implements ExcelReader {
                 sink.error(err);
             }
         });
+    }
+
+    private String getText(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        char first = text.charAt(0);
+        switch (first) {
+            case '\uFEFF':
+            case '\uFFFE':
+                return text.substring(1);
+        }
+
+        return text;
     }
 
     @SneakyThrows
