@@ -2,14 +2,17 @@ package org.hswebframework.reactor.excel.poi;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
+import org.apache.commons.compress.utils.Sets;
 import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.BoundedCell;
 
 import java.math.BigDecimal;
+import java.time.LocalTime;
 import java.util.Date;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.apache.poi.ss.usermodel.DateUtil.isADateFormat;
 
@@ -32,6 +35,18 @@ class PoiCell implements BoundedCell {
         this.value = convertValue();
     }
 
+    private Object convertToTime(double value) {
+        long totalSeconds = (long) (value * 24 * 60 * 60);
+        long hours = totalSeconds / 3600;
+        long minutes = (totalSeconds % 3600) / 60;
+        long seconds = totalSeconds % 60;
+        if (hours >= 0 && hours < 24 && minutes >= 0 && seconds >= 0) {
+            return LocalTime.of((int) hours, (int) minutes, (int) seconds);
+        }
+        return value;
+
+    }
+
     private Object convertValue() {
         if (cell == null)
             return null;
@@ -43,8 +58,8 @@ class PoiCell implements BoundedCell {
                     Date date = cell.getDateCellValue();
                     if (date.getTime() > 0) {
                         return date;
-                    }else {
-                        return cell.getNumericCellValue();
+                    } else {
+                        return convertToTime(cell.getNumericCellValue());
                     }
                 }
                 return convertToNumber(cell);
@@ -65,6 +80,8 @@ class PoiCell implements BoundedCell {
                                         ((XSSFWorkbook) workbook).isDate1904());
                                 if (date.getTime() > 0) {
                                     return date;
+                                }else {
+                                    return convertToTime(cellValue.getNumberValue());
                                 }
                             }
                             return cellValue.getNumberValue();
@@ -93,6 +110,22 @@ class PoiCell implements BoundedCell {
         return value;
     }
 
+    /**
+     * @see BuiltinFormats
+     */
+    static final Set<Integer> dateFormats = Sets.newHashSet(
+            0xe, 0xf,0x10,0x11,0x12,0x13,0x14,0x15,0x16,
+            0x20,0x21,0x22,0x23,0x24,0x25,
+            0x2d,0x2e,0x2f,
+            0x36,0x1F,
+
+            0xa5,//  yyyy/mm/dd
+            0xa6,//  m/d/yyyy h:mm
+            0xa7,//  m/d/yyyy
+            0xa8,//  hh:mm AM/PM
+            0xa9 //  hh:mm:ss AM/PM
+
+    );
     public boolean isCellDateFormatted() {
         if (cell == null) return false;
         boolean bDate = false;
@@ -101,7 +134,9 @@ class PoiCell implements BoundedCell {
             CellStyle style = cell.getCellStyle();
             if (style == null) return false;
             int i = style.getDataFormat();
-            if (i == 58 || i == 31) return true;
+            if (dateFormats.contains(i)){
+                return true;
+            }
             String f = style.getDataFormatString();
             f = f.replaceAll("[\"|\']", "").replaceAll("[年|月|日|时|分|秒|毫秒|微秒]", "");
             bDate = isADateFormat(i, f);

@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import reactor.test.StepVerifier;
 
 import java.math.BigDecimal;
+import java.time.LocalTime;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -172,6 +174,23 @@ class PoiExcelReaderTest {
                             put("s1:name", "s2");
                             put("s1:age", "2");
                         }}
+                )
+                .verifyComplete();
+    }
+
+    @Test
+    void testParseTime(){
+        ReactorExcel
+                .<Map<String, Object>>xlsxReader(LinkedHashMap::new)
+                .justReadByHeader()
+                .wrapper(ReactorExcel.mapWrapper())
+                .read(PoiExcelReaderTest.class.getResourceAsStream("/test-time.xls"))
+                .as(StepVerifier::create)
+                .expectNext(
+                        Collections.singletonMap("time", LocalTime.of(1,0,0)),
+                        Collections.singletonMap("time", LocalTime.of(13,0,0)),
+                        Collections.singletonMap("time", LocalTime.of(4,59,59)),
+                        Collections.singletonMap("time", LocalTime.of(4,59,59))
                 )
                 .verifyComplete();
     }
