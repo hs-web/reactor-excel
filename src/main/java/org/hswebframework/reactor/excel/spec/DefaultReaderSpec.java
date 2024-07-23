@@ -51,7 +51,7 @@ class DefaultReaderSpec<T> implements ReaderSpec.MultiSheetHeaderReaderSpec<T>,
 
     @Override
     public Flux<T> read(InputStream stream, ExcelOption... options) {
-        if (wrappers.size() == 0) {
+        if (wrappers.isEmpty()) {
             //未设置包装器,调用wrapper方法或者sheet方法进行设置
             throw new UnsupportedOperationException("wrapper can not be empty.");
         }
@@ -102,7 +102,7 @@ class DefaultReaderSpec<T> implements ReaderSpec.MultiSheetHeaderReaderSpec<T>,
                             headerText = header.valueAsText().orElse(null);
                             if (headerText != null) {
                                 //如果指定了表头映射,则必须满足映射
-                                if (headers.size() > 0) {
+                                if (!headers.isEmpty()) {
                                     headerText = headers.get(headerText);
                                 }
                             }

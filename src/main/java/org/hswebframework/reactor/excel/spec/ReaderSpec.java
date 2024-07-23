@@ -179,7 +179,7 @@ public interface ReaderSpec<T> {
          * @param wrapper 包装器
          * @return this
          */
-        SheetReaderSpec<T> wrapper(Consumer3<T, String, Cell> wrapper);
+        SheetHeaderReaderSpec<T> wrapper(Consumer3<T, String, Cell> wrapper);
 
         @Override
         MultiSheetReaderSpec<T> oneInstanceEachSheet();

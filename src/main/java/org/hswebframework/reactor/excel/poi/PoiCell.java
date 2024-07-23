@@ -7,6 +7,8 @@ import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.BoundedCell;
+import reactor.util.function.Tuple2;
+import reactor.util.function.Tuples;
 
 import java.math.BigDecimal;
 import java.time.LocalTime;
@@ -50,27 +52,38 @@ class PoiCell implements BoundedCell {
     private Object convertValue() {
         if (cell == null)
             return null;
+        return convertValueAndType().getT2();
+    }
+
+    private Tuple2<CellDataType, Object> convertValueAndType() {
+
         switch (cell.getCellType()) {
             case BOOLEAN:
-                return cell.getBooleanCellValue();
+                return Tuples.of(
+                        CellDataType.BOOLEAN,
+                        cell.getBooleanCellValue()
+                );
             case NUMERIC:
                 if (isCellDateFormatted()) {
                     Date date = cell.getDateCellValue();
                     if (date.getTime() > 0) {
-                        return date;
+                        return Tuples.of(CellDataType.DATE_TIME, date);
                     } else {
-                        return convertToTime(cell.getNumericCellValue());
+                        return Tuples.of(CellDataType.DATE_TIME, convertToTime(cell.getNumericCellValue()));
                     }
                 }
-                return convertToNumber(cell);
+                return Tuples.of(CellDataType.NUMBER, convertToNumber(cell));
             case STRING:
-                return cell.getRichStringCellValue().getString();
+                return Tuples.of(CellDataType.STRING, cell.getRichStringCellValue().getString());
             case FORMULA:
                 FormulaEvaluator evaluator = cell.getSheet().getWorkbook().getCreationHelper().createFormulaEvaluator();
                 CellValue cellValue = evaluator.evaluate(cell);
                 switch (cellValue.getCellType()) {
                     case BOOLEAN:
-                        return cellValue.getBooleanValue();
+                        return Tuples.of(
+                                CellDataType.BOOLEAN,
+                                cellValue.getBooleanValue()
+                        );
                     case NUMERIC:
                         if (isCellDateFormatted()) {
                             Workbook workbook = cell.getRow().getSheet().getWorkbook();
@@ -79,21 +92,21 @@ class PoiCell implements BoundedCell {
                                         cellValue.getNumberValue(),
                                         ((XSSFWorkbook) workbook).isDate1904());
                                 if (date.getTime() > 0) {
-                                    return date;
-                                }else {
-                                    return convertToTime(cellValue.getNumberValue());
+                                    return Tuples.of(CellDataType.DATE_TIME, date);
+                                } else {
+                                    return Tuples.of(CellDataType.DATE_TIME, convertToTime(cellValue.getNumberValue()));
                                 }
                             }
-                            return cellValue.getNumberValue();
+                            return Tuples.of(CellDataType.NUMBER, cellValue.getNumberValue());
                         }
-                        return cellValue.getNumberValue();
+                        return Tuples.of(CellDataType.NUMBER, cellValue.getNumberValue());
                     case BLANK:
-                        return "";
+                        return Tuples.of(CellDataType.AUTO, "");
                     default:
-                        return cellValue.getStringValue();
+                        return Tuples.of(CellDataType.STRING, cellValue.getStringValue());
                 }
             default:
-                return cell.getStringCellValue();
+                return Tuples.of(CellDataType.STRING, cell.getStringCellValue());
         }
     }
 
@@ -114,10 +127,10 @@ class PoiCell implements BoundedCell {
      * @see BuiltinFormats
      */
     static final Set<Integer> dateFormats = Sets.newHashSet(
-            0xe, 0xf,0x10,0x11,0x12,0x13,0x14,0x15,0x16,
-            0x20,0x21,0x22,0x23,0x24,0x25,
-            0x2d,0x2e,0x2f,
-            0x36,0x1F,
+            0xe, 0xf, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
+            0x2d, 0x2e, 0x2f,
+            0x36, 0x1F,
 
             0xa5,//  yyyy/mm/dd
             0xa6,//  m/d/yyyy h:mm
@@ -126,6 +139,7 @@ class PoiCell implements BoundedCell {
             0xa9 //  hh:mm:ss AM/PM
 
     );
+
     public boolean isCellDateFormatted() {
         if (cell == null) return false;
         boolean bDate = false;
@@ -134,7 +148,7 @@ class PoiCell implements BoundedCell {
             CellStyle style = cell.getCellStyle();
             if (style == null) return false;
             int i = style.getDataFormat();
-            if (dateFormats.contains(i)){
+            if (dateFormats.contains(i)) {
                 return true;
             }
             String f = style.getDataFormatString();
@@ -186,19 +200,10 @@ class PoiCell implements BoundedCell {
 
     @Override
     public CellDataType getType() {
-        switch (cell.getCellType()) {
-            case NUMERIC:
-                return CellDataType.NUMBER;
-            case FORMULA:
-                return CellDataType.FORMULA;
-            case BOOLEAN:
-                return CellDataType.BOOLEAN;
-            default:
-                if (isCellDateFormatted()) {
-                    return CellDataType.DATE_TIME;
-                }
-                return CellDataType.STRING;
+        if (cell == null) {
+            return CellDataType.AUTO;
         }
+        return convertValueAndType().getT1();
     }
 
 }
