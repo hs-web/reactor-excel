@@ -111,7 +111,8 @@ class PoiCell implements BoundedCell {
     }
 
     private Number convertToNumber(Cell cell) {
-        BigDecimal value = new BigDecimal(cell.toString());
+        DataFormatter formatter = new DataFormatter();
+        BigDecimal value = new BigDecimal(formatter.formatCellValue(cell));
         if (value.scale() == 0) {
             return value.longValue();
         }
