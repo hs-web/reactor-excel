@@ -36,17 +36,30 @@ class PoiExcelReaderTest {
     @Test
     void testNumber() {
         ReactorExcel
-                .<Map<String, Object>>xlsxReader(LinkedHashMap::new)
-                .justRead()
-                .wrapper(ReactorExcel.cell(1, 2, (map, value) -> map.put("num", value)))
-                .oneInstanceAllSheets()
-                .read(PoiExcelReaderTest.class.getResourceAsStream("/simple.xlsx"))
-                .as(StepVerifier::create)
-                .expectNext(
-                        new LinkedHashMap<String, Object>() {{
-                            put("num", new BigDecimal("0.6"));
-                        }})
-                .verifyComplete();
+            .<Map<String, Object>>xlsxReader(LinkedHashMap::new)
+            .justRead()
+            .wrapper(ReactorExcel.cell(1, 2, (map, value) -> map.put("num", value)))
+            .oneInstanceAllSheets()
+            .read(PoiExcelReaderTest.class.getResourceAsStream("/simple.xlsx"))
+            .as(StepVerifier::create)
+            .expectNext(
+                new LinkedHashMap<String, Object>() {{
+                    put("num", new BigDecimal("0.6"));
+                }})
+            .verifyComplete();
+
+        ReactorExcel
+            .<Map<String, Object>>xlsxReader(LinkedHashMap::new)
+            .justRead()
+            .wrapper(ReactorExcel.cell(1, 3, (map, value) -> map.put("num", value)))
+            .oneInstanceAllSheets()
+            .read(PoiExcelReaderTest.class.getResourceAsStream("/simple.xlsx"))
+            .as(StepVerifier::create)
+            .expectNext(
+                new LinkedHashMap<String, Object>() {{
+                    put("num", 52000L);
+                }})
+            .verifyComplete();
     }
 
     @Test
