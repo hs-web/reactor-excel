@@ -6,7 +6,7 @@
 
     <groupId>org.hswebframework</groupId>
     <artifactId>reactor-excel</artifactId>
-    <version>1.0.6</version>
+    <version>1.0.7-SNAPSHOT</version>
 
     <name>JetLinks</name>
     <url>https://github.com/hs-web/reactor-excel</url>
