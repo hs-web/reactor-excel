@@ -51,6 +51,22 @@ public class CsvReader implements ExcelReader {
         return new BufferedInputStream(stream);
     }
 
+    static final CSVFormat defaultFormat = CSVFormat.EXCEL.builder().setQuote(null).build();
+
+
+    private CSVFormat getFormat(ExcelOption... options) {
+        if (options == null) {
+            return defaultFormat;
+        }
+        for (ExcelOption option : options) {
+            if (option.isWrapFor(FormatOption.class)) {
+                return option.unwrap(FormatOption.class).getFormat();
+            }
+        }
+        return defaultFormat;
+
+    }
+
     @Override
     @SneakyThrows
     public Flux<CsvCell> read(InputStream inputStream, ExcelOption... options) {
@@ -59,9 +75,7 @@ public class CsvReader implements ExcelReader {
 
             InputStream buffered = transformInputStream(inputStream);
 
-            final CSVFormat csvFormat = CSVFormat.EXCEL.builder().setQuote(null).build();
-
-            try (CSVParser parser = csvFormat.parse(new InputStreamReader(
+            try (CSVParser parser =  getFormat(options).parse(new InputStreamReader(
                     buffered,
                     detectCharset(buffered, options)))) {
 
