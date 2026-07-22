@@ -22,16 +22,12 @@ public class StreamUtils {
 
                 @Override
                 public void write(byte[] b, int off, int len) {
-                    if (len == b.length) {
-                        sink.next(b);
-                    } else {
-                        sink.next(Arrays.copyOfRange(b, off, off + len));
-                    }
+                    sink.next(Arrays.copyOfRange(b, off, off + len));
                 }
 
                 @Override
                 public void write(byte[] b) {
-                    sink.next(b);
+                    sink.next(Arrays.copyOf(b, b.length));
                 }
 
                 @Override
