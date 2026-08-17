@@ -46,6 +46,7 @@
         <project.build.jdk>${java.version}</project.build.jdk>
         <lombok.version>1.18.42</lombok.version>
         <reactor.version>2020.0.31</reactor.version>
+        <netty.version>4.1.137.Final</netty.version>
         <apache.poi.version>5.2.3</apache.poi.version>
     </properties>
 
@@ -267,6 +268,12 @@
         <dependency>
             <groupId>io.projectreactor</groupId>
             <artifactId>reactor-core</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-buffer</artifactId>
+            <version>${netty.version}</version>
         </dependency>
 
         <dependency>

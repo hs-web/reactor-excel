@@ -104,7 +104,7 @@ class DefaultSheetSpec implements SheetSpec.HeaderSheetSpec, SheetSpec {
         return Flux.concat(
                 expander.headers(firstRowIndex),
                 Flux.fromIterable(fixedCells),
-                rows.index().concatMap((idx) -> expander.apply(idx.getT1() + firstRowIndex + 1, idx.getT2())),
+                rows.index().concatMap((idx) -> expander.apply(idx.getT1() + firstRowIndex + 1, idx.getT2()), 1),
                 cells);
     }
 

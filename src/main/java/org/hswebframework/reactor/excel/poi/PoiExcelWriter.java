@@ -14,6 +14,7 @@ import org.hswebframework.reactor.excel.poi.options.RowOption;
 import org.hswebframework.reactor.excel.poi.options.SheetOption;
 import org.hswebframework.reactor.excel.poi.options.WorkbookOption;
 import org.hswebframework.reactor.excel.spi.ExcelWriter;
+import org.hswebframework.reactor.excel.utils.StreamUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -40,13 +41,22 @@ public class PoiExcelWriter implements ExcelWriter {
     protected void writeAndClose(Workbook workbook, OutputStream stream) {
         try {
             workbook.write(stream);
-            workbook.close();
             stream.flush();
-            stream.close();
         } catch (Throwable e) {
+            closeQuietly(workbook, stream);
             log.error(e.getMessage(), e);
             throw e;
         }
+        try {
+            workbook.close();
+        } finally {
+            stream.close();
+        }
+    }
+
+    private void closeQuietly(Workbook workbook, OutputStream stream) {
+        StreamUtils.safeClose(workbook);
+        StreamUtils.safeClose(stream);
     }
 
     private void handleWriteOption(Workbook workbook, Context context, Options... options) {
@@ -82,38 +92,42 @@ public class PoiExcelWriter implements ExcelWriter {
     public Mono<Void> write(Flux<WritableCell> dataStream,
                             OutputStream outputStream,
                             ExcelOption... options) {
-        Context context = Context.create();
         return Mono.defer(() -> {
+            Context context = Context.create();
             Options opts = options.length > 0 ? Options.of(Arrays.asList(options)) : Options.empty();
-
             Workbook workbook = createWorkBook();
-            handleWriteOption(workbook, context, opts);
-
-            return dataStream
-                    .doOnNext(cell -> {
-                        Sheet sheet;
-                        Options cellOpts = cell.options();
-                        try {
-                            sheet = workbook.getSheetAt(cell.getSheetIndex());
-                        } catch (IllegalArgumentException e) {
-                            sheet = workbook.createSheet();
-                            handleWriteOption(sheet, context, opts, cellOpts);
-                        }
-                        int rowIndex = (int) cell.getRowIndex();
-                        Row row = sheet.getRow(rowIndex);
-                        if (row == null) {
-                            row = sheet.createRow(rowIndex);
-                            handleWriteOption(row, context, opts, cellOpts);
-                        }
-                        Cell poiCell = row.getCell(cell.getColumnIndex());
-                        if (poiCell == null) {
-                            poiCell = row.createCell(cell.getColumnIndex());
-                        }
-                        wrapCell(poiCell, cell);
-                        handleWriteOption(poiCell, cell, context, opts, cellOpts);
-                    })
-                    .doFinally((s) -> writeAndClose(workbook, outputStream))
-                    .then();
+            try {
+                handleWriteOption(workbook, context, opts);
+                return dataStream
+                        .doOnNext(cell -> {
+                            Sheet sheet;
+                            Options cellOpts = cell.options();
+                            try {
+                                sheet = workbook.getSheetAt(cell.getSheetIndex());
+                            } catch (IllegalArgumentException e) {
+                                sheet = workbook.createSheet();
+                                handleWriteOption(sheet, context, opts, cellOpts);
+                            }
+                            int rowIndex = (int) cell.getRowIndex();
+                            Row row = sheet.getRow(rowIndex);
+                            if (row == null) {
+                                row = sheet.createRow(rowIndex);
+                                handleWriteOption(row, context, opts, cellOpts);
+                            }
+                            Cell poiCell = row.getCell(cell.getColumnIndex());
+                            if (poiCell == null) {
+                                poiCell = row.createCell(cell.getColumnIndex());
+                            }
+                            wrapCell(poiCell, cell);
+                            handleWriteOption(poiCell, cell, context, opts, cellOpts);
+                        })
+                        .then(Mono.<Void>fromRunnable(() -> writeAndClose(workbook, outputStream)))
+                        .doOnError(error -> closeQuietly(workbook, outputStream))
+                        .doOnCancel(() -> closeQuietly(workbook, outputStream));
+            } catch (Throwable error) {
+                closeQuietly(workbook, outputStream);
+                return Mono.error(error);
+            }
         });
     }
 

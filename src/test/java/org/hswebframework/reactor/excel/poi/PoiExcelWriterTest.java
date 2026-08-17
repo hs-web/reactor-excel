@@ -1,11 +1,14 @@
 package org.hswebframework.reactor.excel.poi;
 
 import lombok.SneakyThrows;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellRangeAddress;
 import org.hswebframework.reactor.excel.ReactorExcel;
+import org.hswebframework.reactor.excel.utils.StreamUtils;
 import org.hswebframework.reactor.excel.poi.options.AddNormalPullDownSheetOption;
 import org.hswebframework.reactor.excel.poi.options.PoiWriteOptions;
 import org.junit.jupiter.api.Test;
@@ -15,12 +18,16 @@ import reactor.test.StepVerifier;
 
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class PoiExcelWriterTest {
 
@@ -126,5 +133,34 @@ class PoiExcelWriterTest {
                 .verify();
 
         Thread.sleep(1000);
+    }
+
+    @Test
+    @SneakyThrows
+    void testByteBufWrite() {
+        byte[] bytes = ReactorExcel
+            .writer("xlsx")
+            .header("id", "ID")
+            .writeByteBufs(
+                Flux.just(new HashMap<String, Object>() {{
+                    put("id", 1);
+                }}),
+                1024
+            )
+            .map(StreamUtils::releaseToByteArray)
+            .reduce(new byte[0], PoiExcelWriterTest::concat)
+            .block();
+
+        try (Workbook workbook = WorkbookFactory.create(new ByteArrayInputStream(bytes))) {
+            assertEquals("ID", workbook.getSheetAt(0).getRow(0).getCell(0).getStringCellValue());
+            assertEquals("1", workbook.getSheetAt(0).getRow(1).getCell(0).getStringCellValue());
+        }
+    }
+
+    private static byte[] concat(byte[] left, byte[] right) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(left.length + right.length);
+        output.write(left, 0, left.length);
+        output.write(right, 0, right.length);
+        return output.toByteArray();
     }
 }

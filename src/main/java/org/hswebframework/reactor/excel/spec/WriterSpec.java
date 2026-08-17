@@ -1,5 +1,7 @@
 package org.hswebframework.reactor.excel.spec;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import org.hswebframework.reactor.excel.ExcelOption;
 import org.hswebframework.reactor.excel.spi.ExcelWriter;
 import org.hswebframework.reactor.excel.utils.StreamUtils;
@@ -32,7 +34,37 @@ public interface WriterSpec {
      * @return 字节流
      */
     default Flux<byte[]> writeBytes(int bufferSize) {
-        return StreamUtils.buffer(bufferSize, this::write);
+        return writeByteBufs(bufferSize)
+            .map(StreamUtils::releaseToByteArray);
+    }
+
+    /**
+     * 写出到引用计数的 Netty 字节缓冲区。
+     *
+     * <p>每个已发送缓冲区的所有权转移给订阅者，订阅者必须负责释放。</p>
+     *
+     * @param bufferSize 缓冲区大小
+     * @return 字节流
+     * @since 1.0.7
+     */
+    default Flux<ByteBuf> writeByteBufs(int bufferSize) {
+        return writeByteBufs(ByteBufAllocator.DEFAULT, bufferSize);
+    }
+
+    /**
+     * 写出到引用计数的 Netty 字节缓冲区。
+     *
+     * <p>默认实现通过有界 OutputStream 适配器工作；具体写出器可以覆盖该方法，
+     * 让数据源需求直接由下游 ByteBuf 需求驱动。每个已发送缓冲区的所有权转移给
+     * 订阅者，订阅者必须负责释放。</p>
+     *
+     * @param allocator 字节缓冲区分配器
+     * @param bufferSize 缓冲区大小
+     * @return 字节流
+     * @since 1.0.7
+     */
+    default Flux<ByteBuf> writeByteBufs(ByteBufAllocator allocator, int bufferSize) {
+        return StreamUtils.buffer(bufferSize, allocator, this::write);
     }
 
     /**
