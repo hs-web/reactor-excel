@@ -19,6 +19,17 @@ import java.io.OutputStreamWriter;
 import java.nio.charset.Charset;
 import java.util.Objects;
 
+/**
+ * CSV serializer with blocking {@link OutputStream} and demand-driven {@link ByteBuf} outputs.
+ *
+ * <p>The reactive path does not wait on locks or switch schedulers. Cell conversion and CSV
+ * encoding run synchronously on the thread that delivers the source signal. Implementations of
+ * {@link WritableCell#valueAsText()} must therefore be non-blocking; callers must establish an
+ * upstream scheduler boundary when conversion can block or requires isolation from an event-loop
+ * thread.</p>
+ *
+ * @since 1.0
+ */
 @Slf4j
 public class CsvWriter implements ExcelWriter {
 
@@ -77,9 +88,20 @@ public class CsvWriter implements ExcelWriter {
             dataStream,
             allocator,
             bufferSize,
+            getMaxEncodedCellBytes(options),
             getFormat(options),
             getCharset(options)
         );
+    }
+
+    private int getMaxEncodedCellBytes(ExcelOption... options) {
+        int maximum = MaxEncodedCellBytesOption.DEFAULT_MAX_ENCODED_CELL_BYTES;
+        for (ExcelOption option : options) {
+            if (option instanceof MaxEncodedCellBytesOption) {
+                maximum = ((MaxEncodedCellBytesOption) option).getMaxEncodedCellBytes();
+            }
+        }
+        return maximum;
     }
 
     private CSVFormat getFormat(ExcelOption... options) {

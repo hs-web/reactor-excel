@@ -9,22 +9,29 @@ import org.hswebframework.reactor.excel.WritableCell;
 import org.reactivestreams.Subscription;
 import reactor.core.CoreSubscriber;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Operators;
 import reactor.util.context.Context;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.Charset;
+import java.util.ArrayDeque;
 import java.util.Objects;
+import java.util.Queue;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+import java.util.function.BooleanSupplier;
 
 /**
- * Incremental CSV encoder that couples cell requests to ByteBuf demand.
+ * Incremental CSV encoder that couples cell requests to {@link ByteBuf} demand.
  *
- * <p>Each subscription keeps one continuous charset encoder, so stateful encodings are not reset
- * between cells. At most one encoded cell and the encoder's bounded final bytes are retained until
- * downstream demand arrives.</p>
+ * <p>Each subscription owns one continuous charset encoder and a lock-free drain loop. Encoding
+ * writes directly into a bounded per-cell buffer, then demand slices it into fixed-size output
+ * buffers without copying. Reactive demand bounds the number of source cells, while
+ * {@code maxEncodedCellBytes} bounds the encoded representation of the current cell.</p>
  */
 final class CsvByteBufFlux extends Flux<ByteBuf> {
 
@@ -34,6 +41,8 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
 
     private final int bufferSize;
 
+    private final int maxEncodedCellBytes;
+
     private final CSVFormat format;
 
     private final Charset charset;
@@ -41,6 +50,7 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
     CsvByteBufFlux(Flux<WritableCell> source,
                    ByteBufAllocator allocator,
                    int bufferSize,
+                   int maxEncodedCellBytes,
                    CSVFormat format,
                    Charset charset) {
         this.source = Objects.requireNonNull(source, "source");
@@ -48,7 +58,11 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
         if (bufferSize <= 0) {
             throw new IllegalArgumentException("bufferSize must be greater than zero");
         }
+        if (maxEncodedCellBytes <= 0) {
+            throw new IllegalArgumentException("maxEncodedCellBytes must be greater than zero");
+        }
         this.bufferSize = bufferSize;
+        this.maxEncodedCellBytes = maxEncodedCellBytes;
         this.format = Objects.requireNonNull(format, "format");
         this.charset = Objects.requireNonNull(charset, "charset");
     }
@@ -57,14 +71,26 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
     public void subscribe(CoreSubscriber<? super ByteBuf> actual) {
         final CsvSubscription subscription;
         try {
-            subscription = new CsvSubscription(actual, allocator, bufferSize, format, charset);
+            subscription = new CsvSubscription(
+                actual,
+                allocator,
+                bufferSize,
+                maxEncodedCellBytes,
+                format,
+                charset
+            );
         } catch (Throwable error) {
-            actual.onSubscribe(EmptySubscription.INSTANCE);
-            actual.onError(error);
+            Operators.error(actual, error);
             return;
         }
 
-        actual.onSubscribe(subscription);
+        try {
+            actual.onSubscribe(subscription);
+        } catch (Throwable error) {
+            subscription.cancel();
+            Operators.onErrorDropped(error, actual.currentContext());
+            return;
+        }
         if (subscription.isCancelled()) {
             return;
         }
@@ -75,67 +101,73 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
         }
     }
 
-    private enum EmptySubscription implements Subscription {
-        INSTANCE;
-
-        @Override
-        public void request(long count) {
-            // The subscription has already failed during initialization.
-        }
-
-        @Override
-        public void cancel() {
-            // The subscription has already failed during initialization.
-        }
-    }
-
     private static final class CsvSubscription implements CoreSubscriber<WritableCell>, Subscription {
+
+        private static final AtomicReferenceFieldUpdater<CsvSubscription, Subscription> UPSTREAM =
+            AtomicReferenceFieldUpdater.newUpdater(
+                CsvSubscription.class,
+                Subscription.class,
+                "upstream"
+            );
+
+        private static final AtomicLongFieldUpdater<CsvSubscription> REQUESTED =
+            AtomicLongFieldUpdater.newUpdater(CsvSubscription.class, "requested");
 
         private final CoreSubscriber<? super ByteBuf> downstream;
 
-        private final ByteBufAllocator allocator;
-
-        private final int bufferSize;
-
-        private final ReentrantLock lock = new ReentrantLock();
-
         private final AtomicInteger wip = new AtomicInteger();
 
-        private final ByteArrayOutputStream encoded = new ByteArrayOutputStream();
+        private final ChunkedByteBufOutputStream output;
 
         private final CSVPrinter printer;
 
-        private Subscription upstream;
+        private volatile Subscription upstream;
 
-        private byte[] pending;
+        private volatile WritableCell pendingCell;
 
-        private int pendingOffset;
+        private volatile long requested;
 
-        private long requested;
+        private volatile boolean sourceDone;
 
+        private volatile boolean cancelled;
+
+        private volatile boolean terminated;
+
+        private volatile Throwable error;
+
+        // The following fields are only accessed by the drain owner.
         private boolean sourceRequested;
 
-        private boolean done;
-
-        private boolean cancelled;
-
-        private boolean terminated;
-
-        private Throwable error;
+        private boolean outputClosed;
 
         private CsvSubscription(CoreSubscriber<? super ByteBuf> downstream,
                                 ByteBufAllocator allocator,
                                 int bufferSize,
+                                int maxEncodedCellBytes,
                                 CSVFormat format,
                                 Charset charset) throws IOException {
             this.downstream = Objects.requireNonNull(downstream, "downstream");
-            this.allocator = allocator;
-            this.bufferSize = bufferSize;
-            byte[] bom = "\ufeff".getBytes(charset);
-            encoded.write(bom, 0, bom.length);
-            this.printer = new CSVPrinter(new OutputStreamWriter(encoded, charset), format);
-            printer.flush();
-            this.pending = takeEncoded();
+            ChunkedByteBufOutputStream output = new ChunkedByteBufOutputStream(
+                allocator,
+                bufferSize,
+                maxEncodedCellBytes,
+                () -> cancelled
+            );
+            try {
+                // The BOM remains a separate chunk so no source cell is requested for its demand.
+                byte[] bom = "\ufeff".getBytes(charset);
+                output.write(bom, 0, bom.length);
+                output.sealCurrent();
+                output.beginCell();
+                CSVPrinter printer = new CSVPrinter(new OutputStreamWriter(output, charset), format);
+                printer.flush();
+                output.endCell();
+                this.printer = printer;
+                this.output = output;
+            } catch (IOException | RuntimeException | Error creationError) {
+                output.abort();
+                throw creationError;
+            }
         }
 
         @Override
@@ -145,22 +177,9 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
 
         @Override
         public void onSubscribe(Subscription subscription) {
-            Objects.requireNonNull(subscription, "subscription");
-            boolean reject;
-            lock.lock();
-            try {
-                reject = upstream != null || cancelled || done;
-                if (!reject) {
-                    upstream = subscription;
-                }
-            } finally {
-                lock.unlock();
+            if (Operators.setOnce(UPSTREAM, this, subscription)) {
+                drain();
             }
-            if (reject) {
-                subscription.cancel();
-                return;
-            }
-            drain();
         }
 
         @Override
@@ -169,75 +188,36 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
                 onError(new NullPointerException("CSV source emitted null cell"));
                 return;
             }
-
-            Subscription subscription = null;
-            lock.lock();
-            try {
-                if (cancelled || done) {
-                    return;
-                }
-                sourceRequested = false;
-                try {
-                    printer.print(cell.valueAsText().orElse(""));
-                    if (cell.isEndOfRow()) {
-                        printer.println();
-                    }
-                    printer.flush();
-                    pending = takeEncoded();
-                    pendingOffset = 0;
-                } catch (Throwable error) {
-                    pending = null;
-                    pendingOffset = 0;
-                    done = true;
-                    this.error = error;
-                    subscription = upstream;
-                }
-            } finally {
-                lock.unlock();
+            if (cancelled || sourceDone) {
+                Operators.onNextDropped(cell, currentContext());
+                return;
             }
-            if (subscription != null) {
-                subscription.cancel();
+            if (pendingCell != null) {
+                onError(new IllegalStateException("CSV source emitted more cells than requested"));
+                return;
             }
+            pendingCell = cell;
             drain();
         }
 
         @Override
-        public void onError(Throwable error) {
-            Objects.requireNonNull(error, "error");
-            lock.lock();
-            try {
-                if (cancelled || done) {
-                    return;
-                }
-                sourceRequested = false;
-                pending = null;
-                pendingOffset = 0;
-                done = true;
-                this.error = error;
-            } finally {
-                lock.unlock();
+        public void onError(Throwable sourceError) {
+            Objects.requireNonNull(sourceError, "sourceError");
+            if (cancelled || sourceDone) {
+                Operators.onErrorDropped(sourceError, currentContext());
+                return;
             }
+            error = sourceError;
+            sourceDone = true;
             drain();
         }
 
         @Override
         public void onComplete() {
-            lock.lock();
-            try {
-                if (cancelled || done) {
-                    return;
-                }
-                sourceRequested = false;
-                try {
-                    printer.close();
-                    appendPending(takeEncoded());
-                } catch (Throwable error) {
-                    this.error = error;
-                }
-                done = true;
-            } finally {
-                lock.unlock();
+            if (cancelled || sourceDone) {
+                return;
             }
+            sourceDone = true;
             drain();
         }
 
@@ -247,70 +227,42 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
                 fail(new IllegalArgumentException("request amount must be greater than zero"));
                 return;
             }
-            lock.lock();
-            try {
-                if (cancelled || terminated) {
-                    return;
-                }
-                requested = addCap(requested, count);
-            } finally {
-                lock.unlock();
+            if (cancelled || terminated) {
+                return;
             }
+            Operators.addCap(REQUESTED, this, count);
             drain();
         }
 
         @Override
         public void cancel() {
-            Subscription subscription;
-            lock.lock();
-            try {
-                if (cancelled) {
-                    return;
-                }
-                cancelled = true;
-                pending = null;
-                pendingOffset = 0;
-                sourceRequested = false;
-                subscription = upstream;
-            } finally {
-                lock.unlock();
+            if (cancelled || terminated) {
+                return;
             }
-            if (subscription != null) {
-                subscription.cancel();
-            }
-        }
-
-        private boolean isCancelled() {
-            lock.lock();
-            try {
-                return cancelled;
-            } finally {
-                lock.unlock();
-            }
-        }
-
-        private void fail(Throwable error) {
-            Subscription subscription;
-            lock.lock();
-            try {
-                if (cancelled || terminated) {
-                    return;
-                }
-                pending = null;
-                pendingOffset = 0;
-                sourceRequested = false;
-                done = true;
-                this.error = error;
-                subscription = upstream;
-            } finally {
-                lock.unlock();
-            }
-            if (subscription != null) {
-                subscription.cancel();
-            }
+            cancelled = true;
+            Operators.terminate(UPSTREAM, this);
             drain();
         }
 
+        private boolean isCancelled() {
+            return cancelled;
+        }
+
+        private void fail(Throwable failure) {
+            if (cancelled || terminated) {
+                Operators.onErrorDropped(failure, currentContext());
+                return;
+            }
+            error = failure;
+            sourceDone = true;
+            Operators.terminate(UPSTREAM, this);
+            drain();
+        }
+
+        /**
+         * Serializes all CSVPrinter and queue access without making request or cancel wait for the
+         * current encoder invocation. Upstream and downstream callbacks are always made unlocked.
+         */
         private void drain() {
             if (wip.getAndIncrement() != 0) {
                 return;
@@ -318,68 +270,8 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
 
             int missed = 1;
             for (; ; ) {
-                for (; ; ) {
-                    Subscription subscription = null;
-                    lock.lock();
-                    try {
-                        if (cancelled || terminated) {
-                            break;
-                        }
-                        if (requested > 0 && hasPending()) {
-                            final ByteBuf buffer;
-                            try {
-                                buffer = takeChunk();
-                            } catch (Throwable allocationError) {
-                                pending = null;
-                                pendingOffset = 0;
-                                sourceRequested = false;
-                                done = true;
-                                error = allocationError;
-                                if (upstream != null) {
-                                    upstream.cancel();
-                                }
-                                continue;
-                            }
-                            if (requested != Long.MAX_VALUE) {
-                                requested--;
-                            }
-                            try {
-                                downstream.onNext(buffer);
-                            } catch (Throwable error) {
-                                ReferenceCountUtil.safeRelease(buffer);
-                                cancelled = true;
-                                sourceRequested = false;
-                                if (upstream != null) {
-                                    upstream.cancel();
-                                }
-                            }
-                            continue;
-                        }
-                        if (done) {
-                            terminated = true;
-                            if (error == null) {
-                                downstream.onComplete();
-                            } else {
-                                downstream.onError(error);
-                            }
-                            break;
-                        }
-                        if (requested > 0 && !sourceRequested && upstream != null) {
-                            sourceRequested = true;
-                            subscription = upstream;
-                        } else {
-                            break;
-                        }
-                    } finally {
-                        lock.unlock();
-                    }
-                    if (subscription != null) {
-                        try {
-                            subscription.request(1);
-                        } catch (Throwable error) {
-                            onError(error);
-                        }
-                    }
+                if (!terminated) {
+                    drainAvailable();
                 }
                 missed = wip.addAndGet(-missed);
                 if (missed == 0) {
@@ -388,51 +280,334 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
             }
         }
 
-        private boolean hasPending() {
-            return pending != null && pendingOffset < pending.length;
-        }
+        private void drainAvailable() {
+            for (; ; ) {
+                if (cancelled) {
+                    terminateCancelled();
+                    return;
+                }
 
-        private ByteBuf takeChunk() {
-            int length = Math.min(bufferSize, pending.length - pendingOffset);
-            ByteBuf buffer = allocator.buffer(length, length);
-            buffer.writeBytes(pending, pendingOffset, length);
-            pendingOffset += length;
-            if (pendingOffset == pending.length) {
-                pending = null;
-                pendingOffset = 0;
+                Throwable failure = error;
+                if (failure != null) {
+                    terminateError(failure);
+                    return;
+                }
+
+                WritableCell cell = pendingCell;
+                if (cell != null) {
+                    pendingCell = null;
+                    sourceRequested = false;
+                    encodeCell(cell);
+                    continue;
+                }
+
+                if (sourceDone && !outputClosed) {
+                    finishOutput();
+                    continue;
+                }
+
+                if (requested > 0) {
+                    ByteBuf buffer = output.pollChunk();
+                    if (buffer != null) {
+                        Operators.produced(REQUESTED, this, 1);
+                        emit(buffer);
+                        continue;
+                    }
+                }
+
+                if (sourceDone && outputClosed && output.isEmpty()) {
+                    terminateComplete();
+                    return;
+                }
+
+                if (requested > 0 && output.isEmpty() && !sourceRequested) {
+                    Subscription subscription = upstream;
+                    if (subscription != null
+                        && subscription != Operators.cancelledSubscription()) {
+                        sourceRequested = true;
+                        try {
+                            subscription.request(1);
+                        } catch (Throwable requestError) {
+                            sourceRequested = false;
+                            error = Operators.onOperatorError(
+                                subscription,
+                                requestError,
+                                currentContext()
+                            );
+                            sourceDone = true;
+                            Operators.terminate(UPSTREAM, this);
+                        }
+                        continue;
+                    }
+                }
+                return;
             }
-            return buffer;
         }
 
-        private byte[] takeEncoded() {
-            if (encoded.size() == 0) {
+        private void encodeCell(WritableCell cell) {
+            output.beginCell();
+            try {
+                printer.print(cell.valueAsText().orElse(""));
+                if (cell.isEndOfRow()) {
+                    printer.println();
+                }
+                printer.flush();
+                output.endCell();
+            } catch (Throwable encodingError) {
+                output.abort();
+                if (!cancelled) {
+                    error = Operators.onOperatorError(
+                        upstream,
+                        encodingError,
+                        cell,
+                        currentContext()
+                    );
+                    sourceDone = true;
+                    Operators.terminate(UPSTREAM, this);
+                }
+            }
+        }
+
+        private void finishOutput() {
+            outputClosed = true;
+            try {
+                printer.close();
+            } catch (Throwable closeError) {
+                error = Operators.onOperatorError(closeError, currentContext());
+                output.abort();
+            }
+        }
+
+        private void emit(ByteBuf buffer) {
+            if (cancelled) {
+                ReferenceCountUtil.safeRelease(buffer);
+                return;
+            }
+            try {
+                downstream.onNext(buffer);
+            } catch (Throwable downstreamError) {
+                ReferenceCountUtil.safeRelease(buffer);
+                cancelled = true;
+                Operators.terminate(UPSTREAM, this);
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+
+        private void terminateCancelled() {
+            terminated = true;
+            pendingCell = null;
+            output.abort();
+        }
+
+        private void terminateError(Throwable failure) {
+            terminated = true;
+            pendingCell = null;
+            Operators.terminate(UPSTREAM, this);
+            output.abort();
+            try {
+                downstream.onError(failure);
+            } catch (Throwable downstreamError) {
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+
+        private void terminateComplete() {
+            terminated = true;
+            try {
+                downstream.onComplete();
+            } catch (Throwable downstreamError) {
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+    }
+
+    /**
+     * OutputStream facade used by the continuous OutputStreamWriter. One bounded buffer represents
+     * the current cell and is sliced lazily as demand arrives. Only the drain owner mutates its
+     * queue; cancellation is observed through the supplied atomic flag.
+     */
+    private static final class ChunkedByteBufOutputStream extends OutputStream {
+
+        private final ByteBufAllocator allocator;
+
+        private final int bufferSize;
+
+        private final int maxEncodedCellBytes;
+
+        private final BooleanSupplier cancelled;
+
+        private final Queue<ByteBuf> ready = new ArrayDeque<>();
+
+        private ByteBuf current;
+
+        private int encodedCellBytes;
+
+        private boolean cellActive;
+
+        private boolean closed;
+
+        private ChunkedByteBufOutputStream(ByteBufAllocator allocator,
+                                           int bufferSize,
+                                           int maxEncodedCellBytes,
+                                           BooleanSupplier cancelled) {
+            this.allocator = allocator;
+            this.bufferSize = bufferSize;
+            this.maxEncodedCellBytes = maxEncodedCellBytes;
+            this.cancelled = cancelled;
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            ensureWritable();
+            reserveCellBytes(1);
+            ensureBuffer();
+            current.writeByte(value);
+            if (!cellActive && !current.isWritable()) {
+                sealCurrent();
+            }
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) throws IOException {
+            Objects.requireNonNull(source, "source");
+            if (offset < 0 || length < 0 || offset > source.length - length) {
+                throw new IndexOutOfBoundsException(
+                    "offset=" + offset + ", length=" + length + ", source.length=" + source.length
+                );
+            }
+            if (length == 0) {
+                return;
+            }
+            ensureWritable();
+            reserveCellBytes(length);
+            if (cellActive) {
+                ensureBuffer();
+                current.writeBytes(source, offset, length);
+                return;
+            }
+            while (length > 0) {
+                ensureWritable();
+                ensureBuffer();
+                int copyLength = Math.min(length, current.writableBytes());
+                current.writeBytes(source, offset, copyLength);
+                offset += copyLength;
+                length -= copyLength;
+                if (!current.isWritable()) {
+                    sealCurrent();
+                }
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (closed) {
+                return;
+            }
+            ensureWritable();
+            sealCurrent();
+            closed = true;
+        }
+
+        private void beginCell() {
+            if (cellActive) {
+                throw new IllegalStateException("previous CSV cell encoding did not finish");
+            }
+            cellActive = true;
+            encodedCellBytes = 0;
+        }
+
+        private void endCell() {
+            sealCurrent();
+            cellActive = false;
+            encodedCellBytes = 0;
+        }
+
+        private void reserveCellBytes(int length) {
+            if (!cellActive) {
+                return;
+            }
+            if (length > maxEncodedCellBytes - encodedCellBytes) {
+                throw new IllegalStateException(
+                    "CSV cell encoded bytes exceed maxEncodedCellBytes: "
+                        + maxEncodedCellBytes
+                );
+            }
+            encodedCellBytes += length;
+        }
+
+        private void ensureWritable() throws IOException {
+            if (closed) {
+                throw new IOException("CSV ByteBuf output is closed");
+            }
+            if (cancelled.getAsBoolean()) {
+                throw new CancellationException("CSV ByteBuf output was cancelled");
+            }
+        }
+
+        private void ensureBuffer() {
+            if (current == null) {
+                if (cellActive) {
+                    int initialCapacity = Math.min(bufferSize, maxEncodedCellBytes);
+                    current = allocator.buffer(initialCapacity, maxEncodedCellBytes);
+                } else {
+                    current = allocator.buffer(bufferSize, bufferSize);
+                }
+            }
+        }
+
+        private void sealCurrent() {
+            if (current == null) {
+                return;
+            }
+            ByteBuf buffer = current;
+            current = null;
+            if (!buffer.isReadable()) {
+                ReferenceCountUtil.safeRelease(buffer);
+                return;
+            }
+            try {
+                ready.add(buffer);
+            } catch (Throwable queueError) {
+                ReferenceCountUtil.safeRelease(buffer);
+                throw queueError;
+            }
+        }
+
+        private ByteBuf pollChunk() {
+            ByteBuf buffer = ready.peek();
+            if (buffer == null) {
                 return null;
             }
-            byte[] bytes = encoded.toByteArray();
-            encoded.reset();
-            return bytes;
+            if (buffer.readableBytes() <= bufferSize
+                && buffer.readerIndex() == 0
+                && buffer.capacity() <= bufferSize) {
+                return ready.poll();
+            }
+
+            ByteBuf chunk = buffer.readRetainedSlice(
+                Math.min(bufferSize, buffer.readableBytes())
+            );
+            if (!buffer.isReadable()) {
+                ready.poll();
+                ReferenceCountUtil.safeRelease(buffer);
+            }
+            return chunk;
         }
 
-        private void appendPending(byte[] suffix) {
-            if (suffix == null) {
-                return;
-            }
-            if (!hasPending()) {
-                pending = suffix;
-                pendingOffset = 0;
-                return;
-            }
-            int remaining = pending.length - pendingOffset;
-            byte[] combined = new byte[remaining + suffix.length];
-            System.arraycopy(pending, pendingOffset, combined, 0, remaining);
-            System.arraycopy(suffix, 0, combined, remaining, suffix.length);
-            pending = combined;
-            pendingOffset = 0;
+        private boolean isEmpty() {
+            return ready.isEmpty();
         }
 
-        private static long addCap(long current, long increment) {
-            long updated = current + increment;
-            return updated < 0 ? Long.MAX_VALUE : updated;
+        private void abort() {
+            closed = true;
+            cellActive = false;
+            encodedCellBytes = 0;
+            ReferenceCountUtil.safeRelease(current);
+            current = null;
+            ByteBuf buffer;
+            while ((buffer = ready.poll()) != null) {
+                ReferenceCountUtil.safeRelease(buffer);
+            }
         }
     }
 }

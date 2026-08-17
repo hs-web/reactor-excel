@@ -5,6 +5,9 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.util.ReferenceCountUtil;
+import org.hswebframework.reactor.excel.csv.CharsetOption;
+import org.hswebframework.reactor.excel.csv.CsvWriter;
+import org.hswebframework.reactor.excel.csv.MaxEncodedCellBytesOption;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
@@ -17,9 +20,15 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.management.ManagementFactory;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -257,6 +266,114 @@ class ReactiveExportStress {
         assertEquals(0, allocator.liveBytes(), "cancel path leaked a delivered ByteBuf");
     }
 
+    @Test
+    void csvShouldRejectOversizedCellAndReleaseInternalBuffers() throws InterruptedException {
+        int cellMiB = positiveIntProperty("reactor.excel.stress.oversizedCellMiB", 32);
+        int maximum = MaxEncodedCellBytesOption.DEFAULT_MAX_ENCODED_CELL_BYTES;
+        TrackingAllocator allocator = new TrackingAllocator();
+        OneByOneSubscriber<ByteBuf> subscriber = new OneByOneSubscriber<>(
+            ReferenceCountUtil::safeRelease,
+            0,
+            Duration.ZERO,
+            Long.MAX_VALUE
+        );
+        String value = repeat('x', Math.multiplyExact(cellMiB, MEBIBYTE));
+
+        try {
+            new CsvWriter()
+                .write(
+                    Flux.just(WritableCell.of(
+                        0,
+                        0,
+                        0,
+                        CellDataType.STRING,
+                        value,
+                        true
+                    )),
+                    allocator,
+                    STREAM_BUFFER_SIZE,
+                    new CharsetOption(StandardCharsets.UTF_8)
+                )
+                .subscribe(subscriber);
+            assertTrue(subscriber.await(TIMEOUT), "oversized CSV cell timed out");
+        } finally {
+            subscriber.cancel();
+        }
+
+        assertFalse(subscriber.isComplete(), "oversized cell must not complete normally");
+        assertTrue(subscriber.error() instanceof IllegalStateException,
+                   "oversized cell must fail with a size-bound error");
+        assertTrue(subscriber.error().getMessage().contains(String.valueOf(maximum)));
+        assertTrue(allocator.allReleased(), "oversized cell retained internal ByteBuf instances");
+    }
+
+    @Test
+    void csvConcurrentRequestAndCancelShouldNotDeadlockOrLeak() throws Exception {
+        int iterations = positiveIntProperty("reactor.excel.stress.raceIterations", 1_000);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < iterations; i++) {
+                TrackingAllocator allocator = new TrackingAllocator();
+                AtomicReference<Subscription> subscription = new AtomicReference<>();
+                AtomicReference<Throwable> raceError = new AtomicReference<>();
+                CountDownLatch start = new CountDownLatch(1);
+
+                new CsvWriter()
+                    .write(
+                        Flux.just(WritableCell.of(
+                            0,
+                            i,
+                            0,
+                            CellDataType.STRING,
+                            "race-" + i + '-' + repeat('x', 1_024),
+                            true
+                        )),
+                        allocator,
+                        64,
+                        new CharsetOption(StandardCharsets.UTF_8)
+                    )
+                    .subscribe(new Subscriber<ByteBuf>() {
+                        @Override
+                        public void onSubscribe(Subscription value) {
+                            subscription.set(value);
+                        }
+
+                        @Override
+                        public void onNext(ByteBuf value) {
+                            ReferenceCountUtil.safeRelease(value);
+                        }
+
+                        @Override
+                        public void onError(Throwable error) {
+                            raceError.compareAndSet(null, error);
+                        }
+
+                        @Override
+                        public void onComplete() {
+                        }
+                    });
+
+                Future<?> request = executor.submit(() -> {
+                    await(start);
+                    subscription.get().request(Long.MAX_VALUE);
+                });
+                Future<?> cancel = executor.submit(() -> {
+                    await(start);
+                    subscription.get().cancel();
+                });
+                start.countDown();
+                request.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                cancel.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                assertNull(raceError.get(), "request/cancel race failed at iteration " + i);
+                assertTrue(allocator.allReleased(),
+                           "request/cancel race leaked a ByteBuf at iteration " + i);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private static WriterOperator<Integer> csvWriter() {
         return ReactorExcel
             .<Integer>writer("csv")
@@ -315,6 +432,23 @@ class ReactiveExportStress {
         while (candidate > current && !maximum.compareAndSet(current, candidate)) {
             current = maximum.get();
         }
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("timed out waiting to start race workers");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("race worker was interrupted", error);
+        }
+    }
+
+    private static String repeat(char value, int count) {
+        char[] chars = new char[count];
+        java.util.Arrays.fill(chars, value);
+        return new String(chars);
     }
 
     private static final class HeapProbe {
@@ -403,6 +537,41 @@ class ReactiveExportStress {
 
         private long maxLiveBytes() {
             return maxLiveBytes.get();
+        }
+    }
+
+    private static final class TrackingAllocator extends AbstractByteBufAllocator {
+
+        private final ByteBufAllocator delegate = UnpooledByteBufAllocator.DEFAULT;
+
+        private final List<ByteBuf> allocated = new CopyOnWriteArrayList<>();
+
+        private TrackingAllocator() {
+            super(false);
+        }
+
+        @Override
+        protected ByteBuf newHeapBuffer(int initialCapacity, int maxCapacity) {
+            return track(delegate.heapBuffer(initialCapacity, maxCapacity));
+        }
+
+        @Override
+        protected ByteBuf newDirectBuffer(int initialCapacity, int maxCapacity) {
+            return track(delegate.directBuffer(initialCapacity, maxCapacity));
+        }
+
+        @Override
+        public boolean isDirectBufferPooled() {
+            return false;
+        }
+
+        private ByteBuf track(ByteBuf buffer) {
+            allocated.add(buffer);
+            return buffer;
+        }
+
+        private boolean allReleased() {
+            return allocated.stream().allMatch(buffer -> buffer.refCnt() == 0);
         }
     }
 
