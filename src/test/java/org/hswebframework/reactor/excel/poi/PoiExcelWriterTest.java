@@ -10,6 +10,7 @@ import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellRangeAddress;
+import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.hswebframework.reactor.excel.BlockHoundTestSupport;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.ReactorExcel;
@@ -17,6 +18,7 @@ import org.hswebframework.reactor.excel.WritableCell;
 import org.hswebframework.reactor.excel.utils.StreamUtils;
 import org.hswebframework.reactor.excel.poi.options.AddNormalPullDownSheetOption;
 import org.hswebframework.reactor.excel.poi.options.PoiWriteOptions;
+import org.hswebframework.reactor.excel.poi.options.WorkbookOption;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
@@ -37,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -341,6 +344,209 @@ class PoiExcelWriterTest {
             .verify(java.time.Duration.ofSeconds(5));
 
         assertTrue(outputClosed.get(), "resource creation failure did not close the output");
+    }
+
+    @Test
+    void sourceFailureShouldCloseWorkbookAndOutputExactlyOnce() {
+        IllegalStateException expected = new IllegalStateException("source failed");
+        AtomicReference<TrackingWorkbook> workbook = new AtomicReference<>();
+        TrackingOutputStream output = new TrackingOutputStream(null);
+        PoiExcelWriter writer = trackingWriter(workbook, null);
+
+        StepVerifier
+            .create(writer.write(Flux.<WritableCell>error(expected), output))
+            .expectErrorMatches(error -> error == expected)
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertEquals(1, workbook.get().closeCount(), "source failure closed workbook more than once");
+        assertEquals(1, output.closeCount(), "source failure closed output more than once");
+    }
+
+    @Test
+    void workbookOptionFailureShouldCloseCreatedResourcesExactlyOnce() {
+        IllegalStateException expected = new IllegalStateException("workbook option failed");
+        AtomicReference<TrackingWorkbook> workbook = new AtomicReference<>();
+        TrackingOutputStream output = new TrackingOutputStream(null);
+        PoiExcelWriter writer = trackingWriter(workbook, null);
+
+        StepVerifier
+            .create(writer.write(
+                Flux.empty(),
+                output,
+                WorkbookOption.of(ignored -> {
+                    throw expected;
+                })
+            ))
+            .expectErrorMatches(error -> error == expected)
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertEquals(1, workbook.get().closeCount(), "option failure closed workbook more than once");
+        assertEquals(1, output.closeCount(), "option failure closed output more than once");
+    }
+
+    @Test
+    void cellMutationFailureShouldCloseWorkbookAndOutputExactlyOnce() {
+        IllegalStateException expected = new IllegalStateException("cell mutation failed");
+        AtomicReference<TrackingWorkbook> workbook = new AtomicReference<>();
+        TrackingOutputStream output = new TrackingOutputStream(null);
+        PoiExcelWriter writer = trackingWriter(workbook, expected);
+
+        StepVerifier
+            .create(writer.write(
+                Flux.just(WritableCell.of(0, 0, 0, CellDataType.STRING, "value", true)),
+                output
+            ))
+            .expectErrorMatches(error -> error == expected)
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertEquals(1, workbook.get().closeCount(), "cell failure closed workbook more than once");
+        assertEquals(1, output.closeCount(), "cell failure closed output more than once");
+    }
+
+    @Test
+    void workbookWriteFailureShouldPropagateOriginalErrorAndCloseResourcesExactlyOnce() {
+        IOException expected = new IOException("output failed");
+        AtomicReference<TrackingWorkbook> workbook = new AtomicReference<>();
+        TrackingOutputStream output = new TrackingOutputStream(expected);
+        PoiExcelWriter writer = trackingWriter(workbook, null);
+
+        StepVerifier
+            .create(writer.write(Flux.empty(), output))
+            .expectErrorMatches(error -> error == expected)
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertEquals(1, workbook.get().closeCount(), "write failure closed workbook more than once");
+        assertEquals(1, output.closeCount(), "write failure closed output more than once");
+    }
+
+    @Test
+    void cancellationDuringCellMutationShouldNotWaitForLifecycleLock()
+        throws InterruptedException {
+        CountDownLatch cellMutationEntered = new CountDownLatch(1);
+        CountDownLatch releaseCellMutation = new CountDownLatch(1);
+        CountDownLatch cancellationFinished = new CountDownLatch(1);
+        AtomicReference<TrackingWorkbook> workbook = new AtomicReference<>();
+        TrackingOutputStream output = new TrackingOutputStream(null);
+        PoiExcelWriter writer = new PoiExcelWriter() {
+            @Override
+            protected Workbook createWorkBook() {
+                TrackingWorkbook created = new TrackingWorkbook();
+                workbook.set(created);
+                return created;
+            }
+
+            @Override
+            protected void wrapCell(Cell poiCell, WritableCell cell) {
+                cellMutationEntered.countDown();
+                awaitUninterruptibly(releaseCellMutation);
+                super.wrapCell(poiCell, cell);
+            }
+        };
+        reactor.core.Disposable write = writer
+            .write(
+                Flux.just(WritableCell.of(0, 0, 0, CellDataType.STRING, "value", true)),
+                output
+            )
+            .subscribe();
+
+        assertTrue(cellMutationEntered.await(5, TimeUnit.SECONDS), "cell mutation did not start");
+        Mono
+            .fromRunnable(write::dispose)
+            .subscribeOn(Schedulers.parallel())
+            .doFinally(ignored -> cancellationFinished.countDown())
+            .subscribe();
+
+        try {
+            assertTrue(cancellationFinished.await(2, TimeUnit.SECONDS),
+                       "cancellation waited for the in-flight cell mutation");
+        } finally {
+            releaseCellMutation.countDown();
+        }
+        assertTrue(output.awaitClose(), "cancelled writer did not close its output");
+        assertEquals(1, workbook.get().closeCount(), "cancellation closed workbook more than once");
+        assertEquals(1, output.closeCount(), "cancellation closed output more than once");
+    }
+
+    private static PoiExcelWriter trackingWriter(AtomicReference<TrackingWorkbook> workbook,
+                                                 RuntimeException cellFailure) {
+        return new PoiExcelWriter() {
+            @Override
+            protected Workbook createWorkBook() {
+                TrackingWorkbook created = new TrackingWorkbook();
+                workbook.set(created);
+                return created;
+            }
+
+            @Override
+            protected void wrapCell(Cell poiCell, WritableCell cell) {
+                if (cellFailure != null) {
+                    throw cellFailure;
+                }
+                super.wrapCell(poiCell, cell);
+            }
+        };
+    }
+
+    private static final class TrackingWorkbook extends SXSSFWorkbook {
+
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        @Override
+        public void close() throws IOException {
+            closeCount.incrementAndGet();
+            super.close();
+        }
+
+        private int closeCount() {
+            return closeCount.get();
+        }
+    }
+
+    private static final class TrackingOutputStream extends OutputStream {
+
+        private final IOException writeFailure;
+
+        private final ByteArrayOutputStream delegate = new ByteArrayOutputStream();
+
+        private final AtomicInteger closeCount = new AtomicInteger();
+
+        private final CountDownLatch closed = new CountDownLatch(1);
+
+        private TrackingOutputStream(IOException writeFailure) {
+            this.writeFailure = writeFailure;
+        }
+
+        @Override
+        public void write(int value) throws IOException {
+            failIfConfigured();
+            delegate.write(value);
+        }
+
+        @Override
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            failIfConfigured();
+            delegate.write(bytes, offset, length);
+        }
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
+            closed.countDown();
+        }
+
+        private void failIfConfigured() throws IOException {
+            if (writeFailure != null) {
+                throw writeFailure;
+            }
+        }
+
+        private int closeCount() {
+            return closeCount.get();
+        }
+
+        private boolean awaitClose() throws InterruptedException {
+            return closed.await(5, TimeUnit.SECONDS);
+        }
     }
 
     private static void awaitUninterruptibly(CountDownLatch latch) {

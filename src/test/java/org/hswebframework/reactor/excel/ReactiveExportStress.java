@@ -8,22 +8,27 @@ import io.netty.util.ReferenceCountUtil;
 import org.hswebframework.reactor.excel.csv.CharsetOption;
 import org.hswebframework.reactor.excel.csv.CsvWriter;
 import org.hswebframework.reactor.excel.csv.MaxEncodedCellBytesOption;
+import org.hswebframework.reactor.excel.utils.StreamUtils;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
-import org.hswebframework.reactor.excel.utils.StreamUtils;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
+import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.MonoSink;
 import reactor.core.scheduler.Schedulers;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.management.ManagementFactory;
-import java.time.Duration;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
+import java.time.Duration;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -448,6 +453,199 @@ class ReactiveExportStress {
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
+    }
+
+    @Test
+    void streamUtilsCancelAndTerminalRaceShouldSignalAtMostOnceAndNotLeak() throws Exception {
+        int iterations = positiveIntProperty("reactor.excel.stress.raceIterations", 1_000);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        IllegalStateException expected = new IllegalStateException("writer race failure");
+        Queue<Throwable> unexpectedDroppedErrors = new ConcurrentLinkedQueue<>();
+        Hooks.onErrorDropped(error -> {
+            if (error != expected) {
+                unexpectedDroppedErrors.add(error);
+            }
+        });
+        try {
+            for (int i = 0; i < iterations; i++) {
+                TrackingAllocator allocator = new TrackingAllocator();
+                AtomicReference<Subscription> subscription = new AtomicReference<>();
+                AtomicReference<MonoSink<Void>> writerSink = new AtomicReference<>();
+                AtomicReference<Throwable> terminalError = new AtomicReference<>();
+                AtomicInteger terminalSignals = new AtomicInteger();
+                CountDownLatch writerReady = new CountDownLatch(1);
+                CountDownLatch start = new CountDownLatch(1);
+                StreamUtils
+                    .buffer(
+                        64,
+                        allocator,
+                        output -> Mono.create(sink -> {
+                            try {
+                                output.write(new byte[]{1, 2, 3});
+                            } catch (IOException error) {
+                                sink.error(error);
+                                return;
+                            }
+                            writerSink.set(sink);
+                            writerReady.countDown();
+                        })
+                    )
+                    .subscribe(new Subscriber<ByteBuf>() {
+                        @Override
+                        public void onSubscribe(Subscription value) {
+                            subscription.set(value);
+                            value.request(1);
+                        }
+
+                        @Override
+                        public void onNext(ByteBuf value) {
+                            ReferenceCountUtil.safeRelease(value);
+                        }
+
+                        @Override
+                        public void onError(Throwable error) {
+                            terminalError.compareAndSet(null, error);
+                            terminalSignals.incrementAndGet();
+                        }
+
+                        @Override
+                        public void onComplete() {
+                            terminalSignals.incrementAndGet();
+                        }
+                    });
+
+                assertTrue(writerReady.await(5, TimeUnit.SECONDS),
+                           "StreamUtils writer did not reach terminal race at iteration " + i);
+                final boolean failWriter = (i & 1) == 0;
+                Future<?> terminal = executor.submit(() -> {
+                    await(start);
+                    if (failWriter) {
+                        writerSink.get().error(expected);
+                    } else {
+                        writerSink.get().success();
+                    }
+                });
+                Future<?> cancel = executor.submit(() -> {
+                    await(start);
+                    subscription.get().cancel();
+                });
+                start.countDown();
+                terminal.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                cancel.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+                assertTrue(terminalSignals.get() <= 1,
+                           "StreamUtils emitted multiple terminal signals at iteration " + i);
+                if (terminalSignals.get() == 1 && failWriter) {
+                    assertSame(expected, terminalError.get());
+                }
+                assertTrue(allocator.allReleased(),
+                           "StreamUtils terminal race leaked a ByteBuf at iteration " + i);
+            }
+        } finally {
+            try {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            } finally {
+                Hooks.resetOnErrorDropped();
+            }
+        }
+        assertTrue(unexpectedDroppedErrors.isEmpty(),
+                   () -> "unexpected dropped error: " + unexpectedDroppedErrors.peek());
+    }
+
+    @Test
+    void csvCancelAndSourceTerminalRaceShouldSignalAtMostOnceAndNotLeak() throws Exception {
+        int iterations = positiveIntProperty("reactor.excel.stress.raceIterations", 1_000);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        IllegalStateException expected = new IllegalStateException("source race failure");
+        Queue<Throwable> unexpectedDroppedErrors = new ConcurrentLinkedQueue<>();
+        Hooks.onErrorDropped(error -> {
+            if (error != expected) {
+                unexpectedDroppedErrors.add(error);
+            }
+        });
+        try {
+            for (int i = 0; i < iterations; i++) {
+                TrackingAllocator allocator = new TrackingAllocator();
+                AtomicReference<Subscription> subscription = new AtomicReference<>();
+                AtomicReference<FluxSink<WritableCell>> sourceSink = new AtomicReference<>();
+                AtomicReference<Throwable> terminalError = new AtomicReference<>();
+                AtomicInteger terminalSignals = new AtomicInteger();
+                CountDownLatch sourceReady = new CountDownLatch(1);
+                CountDownLatch start = new CountDownLatch(1);
+                Flux<WritableCell> source = Flux.create(sink -> {
+                    sourceSink.set(sink);
+                    sink.onRequest(ignored -> sourceReady.countDown());
+                });
+
+                new CsvWriter()
+                    .write(
+                        source,
+                        allocator,
+                        64,
+                        new CharsetOption(StandardCharsets.UTF_8)
+                    )
+                    .subscribe(new Subscriber<ByteBuf>() {
+                        @Override
+                        public void onSubscribe(Subscription value) {
+                            subscription.set(value);
+                            value.request(Long.MAX_VALUE);
+                        }
+
+                        @Override
+                        public void onNext(ByteBuf value) {
+                            ReferenceCountUtil.safeRelease(value);
+                        }
+
+                        @Override
+                        public void onError(Throwable error) {
+                            terminalError.compareAndSet(null, error);
+                            terminalSignals.incrementAndGet();
+                        }
+
+                        @Override
+                        public void onComplete() {
+                            terminalSignals.incrementAndGet();
+                        }
+                    });
+
+                assertTrue(sourceReady.await(5, TimeUnit.SECONDS),
+                           "CSV source did not reach terminal race at iteration " + i);
+                final boolean failSource = (i & 1) == 0;
+                Future<?> terminal = executor.submit(() -> {
+                    await(start);
+                    if (failSource) {
+                        sourceSink.get().error(expected);
+                    } else {
+                        sourceSink.get().complete();
+                    }
+                });
+                Future<?> cancel = executor.submit(() -> {
+                    await(start);
+                    subscription.get().cancel();
+                });
+                start.countDown();
+                terminal.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                cancel.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+
+                assertTrue(terminalSignals.get() <= 1,
+                           "CSV emitted multiple terminal signals at iteration " + i);
+                if (terminalSignals.get() == 1 && failSource) {
+                    assertSame(expected, terminalError.get());
+                }
+                assertTrue(allocator.allReleased(),
+                           "CSV terminal race leaked a ByteBuf at iteration " + i);
+            }
+        } finally {
+            try {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+            } finally {
+                Hooks.resetOnErrorDropped();
+            }
+        }
+        assertTrue(unexpectedDroppedErrors.isEmpty(),
+                   () -> "unexpected dropped error: " + unexpectedDroppedErrors.peek());
     }
 
     private static WriterOperator<Integer> csvWriter() {

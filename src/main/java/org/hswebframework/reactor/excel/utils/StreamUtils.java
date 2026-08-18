@@ -4,11 +4,14 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.ReferenceCountUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.reactivestreams.Subscription;
+import reactor.core.CoreSubscriber;
 import reactor.core.Disposable;
 import reactor.core.Disposables;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Operators;
 import reactor.core.scheduler.Schedulers;
 import reactor.util.context.Context;
 
@@ -64,8 +67,10 @@ public class StreamUtils {
     /**
      * Adapt a blocking output writer to reference-counted Netty buffers.
      *
-     * <p>Ownership is transferred to the downstream after {@code onNext}. A subscriber must
-     * release consumed buffers; buffers discarded before delivery are released by this Flux.</p>
+     * <p>Ownership is transferred to the downstream only after its {@code onNext} callback
+     * returns normally. A subscriber must release consumed buffers. If the callback throws, this
+     * adapter releases the unaccepted buffer and cancels upstream; buffers discarded before
+     * delivery are also released by this Flux.</p>
      *
      * @param bufferSize maximum size of each emitted buffer
      * @param allocator allocator used independently for every subscription
@@ -90,7 +95,7 @@ public class StreamUtils {
                                       Consumer<T> releaser,
                                       Function<DemandEmitter<T>, ManagedOutputStream> streamFactory) {
         Objects.requireNonNull(streamConsumer, "streamConsumer");
-        return Flux.create(sink -> {
+        Flux<T> output = Flux.create(sink -> {
             DemandEmitter<T> emitter = new DemandEmitter<>(sink, releaser);
             ManagedOutputStream stream = streamFactory.apply(emitter);
             Disposable.Composite resources = Disposables.composite();
@@ -106,6 +111,7 @@ public class StreamUtils {
             sink.onDispose(resources);
             sink.onRequest(writer::request);
         }, FluxSink.OverflowStrategy.ERROR);
+        return new DownstreamGuardFlux<>(output, releaser);
     }
 
     /**
@@ -377,6 +383,125 @@ public class StreamUtils {
 
         private void unparkWriter() {
             LockSupport.unpark(waiter);
+        }
+    }
+
+    /**
+     * Guards the ownership handoff that FluxCreate's serialized sink otherwise hides. Reactor's
+     * SerializedFluxSink cancels and swallows exceptions from onNext, so the adapter must observe
+     * the real callback directly to reclaim a value whose ownership was not transferred.
+     */
+    private static final class DownstreamGuardFlux<T> extends Flux<T> {
+
+        private final Flux<T> source;
+
+        private final Consumer<T> releaser;
+
+        private DownstreamGuardFlux(Flux<T> source, Consumer<T> releaser) {
+            this.source = source;
+            this.releaser = releaser;
+        }
+
+        @Override
+        public void subscribe(CoreSubscriber<? super T> actual) {
+            source.subscribe(new DownstreamGuardSubscriber<>(actual, releaser));
+        }
+    }
+
+    private static final class DownstreamGuardSubscriber<T>
+        implements CoreSubscriber<T>, Subscription {
+
+        private final CoreSubscriber<? super T> downstream;
+
+        private final Consumer<T> releaser;
+
+        private Subscription upstream;
+
+        private volatile boolean done;
+
+        private DownstreamGuardSubscriber(CoreSubscriber<? super T> downstream,
+                                          Consumer<T> releaser) {
+            this.downstream = downstream;
+            this.releaser = releaser;
+        }
+
+        @Override
+        public Context currentContext() {
+            return downstream.currentContext();
+        }
+
+        @Override
+        public void onSubscribe(Subscription subscription) {
+            if (!Operators.validate(upstream, subscription)) {
+                return;
+            }
+            upstream = subscription;
+            try {
+                downstream.onSubscribe(this);
+            } catch (Throwable downstreamError) {
+                done = true;
+                subscription.cancel();
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+
+        @Override
+        public void onNext(T value) {
+            if (done) {
+                releaser.accept(value);
+                return;
+            }
+            try {
+                downstream.onNext(value);
+            } catch (Throwable downstreamError) {
+                // onNext did not return normally, so ownership never left this adapter.
+                done = true;
+                releaser.accept(value);
+                upstream.cancel();
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+
+        @Override
+        public void onError(Throwable error) {
+            if (done) {
+                Operators.onErrorDropped(error, currentContext());
+                return;
+            }
+            done = true;
+            try {
+                downstream.onError(error);
+            } catch (Throwable downstreamError) {
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+
+        @Override
+        public void onComplete() {
+            if (done) {
+                return;
+            }
+            done = true;
+            try {
+                downstream.onComplete();
+            } catch (Throwable downstreamError) {
+                Operators.onErrorDropped(downstreamError, currentContext());
+            }
+        }
+
+        @Override
+        public void request(long count) {
+            if (!done) {
+                upstream.request(count);
+            }
+        }
+
+        @Override
+        public void cancel() {
+            if (!done) {
+                done = true;
+                upstream.cancel();
+            }
         }
     }
 

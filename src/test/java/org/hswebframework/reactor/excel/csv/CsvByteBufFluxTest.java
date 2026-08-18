@@ -16,9 +16,11 @@ import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
+import reactor.test.publisher.TestPublisher;
 
 import java.time.Duration;
 import java.util.List;
@@ -29,11 +31,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CsvByteBufFluxTest {
@@ -137,6 +142,150 @@ class CsvByteBufFluxTest {
         assertTrue(failure.get() instanceof IllegalArgumentException);
         assertFalse(completed.get(), "invalid demand completed normally");
         assertTrue(allocator.allReleased(), "invalid demand leaked the initial BOM buffer");
+    }
+
+    @Test
+    void cancellationFromOnSubscribeShouldReleaseInitialBuffersWithoutSubscribingSource() {
+        TrackingAllocator allocator = new TrackingAllocator();
+        AtomicBoolean sourceSubscribed = new AtomicBoolean();
+        AtomicInteger terminalSignals = new AtomicInteger();
+
+        new CsvWriter()
+            .write(
+                Flux.just(cell("value")).doOnSubscribe(ignored -> sourceSubscribed.set(true)),
+                allocator,
+                64,
+                new CharsetOption(java.nio.charset.StandardCharsets.UTF_8)
+            )
+            .subscribe(new Subscriber<ByteBuf>() {
+                @Override
+                public void onSubscribe(Subscription subscription) {
+                    subscription.cancel();
+                }
+
+                @Override
+                public void onNext(ByteBuf value) {
+                    ReferenceCountUtil.safeRelease(value);
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    terminalSignals.incrementAndGet();
+                }
+
+                @Override
+                public void onComplete() {
+                    terminalSignals.incrementAndGet();
+                }
+            });
+
+        assertFalse(sourceSubscribed.get(), "source subscribed after synchronous cancellation");
+        assertEquals(0, terminalSignals.get(), "cancelled subscriber received a terminal signal");
+        assertTrue(allocator.allReleased(), "synchronous cancellation leaked the initial buffer");
+    }
+
+    @Test
+    void downstreamOnNextFailureShouldReleaseBufferWithoutSubscribingSource() {
+        TrackingAllocator allocator = new TrackingAllocator();
+        AtomicBoolean sourceSubscribed = new AtomicBoolean();
+        AtomicInteger terminalSignals = new AtomicInteger();
+        AtomicReference<Throwable> droppedError = new AtomicReference<>();
+        IllegalStateException expected = new IllegalStateException("downstream failed");
+
+        Hooks.onErrorDropped(droppedError::set);
+        try {
+            new CsvWriter()
+                .write(
+                    Flux.just(cell("value")).doOnSubscribe(ignored -> sourceSubscribed.set(true)),
+                    allocator,
+                    64,
+                    new CharsetOption(java.nio.charset.StandardCharsets.UTF_8)
+                )
+                .subscribe(new Subscriber<ByteBuf>() {
+                    @Override
+                    public void onSubscribe(Subscription subscription) {
+                        subscription.request(1);
+                    }
+
+                    @Override
+                    public void onNext(ByteBuf value) {
+                        throw expected;
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        terminalSignals.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onComplete() {
+                        terminalSignals.incrementAndGet();
+                    }
+                });
+        } finally {
+            Hooks.resetOnErrorDropped();
+        }
+
+        assertSame(expected, droppedError.get(), "callback failure was not dropped");
+        assertFalse(sourceSubscribed.get(), "source subscribed after downstream callback failure");
+        assertEquals(0, terminalSignals.get(), "failing subscriber received another terminal signal");
+        assertTrue(allocator.allReleased(), "downstream callback failure leaked a ByteBuf");
+    }
+
+    @Test
+    void sourceErrorShouldReleaseEncodedChunksThatWereNotDelivered() throws InterruptedException {
+        TrackingAllocator allocator = new TrackingAllocator();
+        IllegalStateException expected = new IllegalStateException("source failed");
+        TestPublisher<WritableCell> source = TestPublisher.create();
+        AtomicReference<Subscription> subscription = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicInteger received = new AtomicInteger();
+        CountDownLatch terminated = new CountDownLatch(1);
+
+        new CsvWriter()
+            .write(
+                source.flux(),
+                allocator,
+                1,
+                new CharsetOption(java.nio.charset.StandardCharsets.UTF_8),
+                MaxEncodedCellBytesOption.of(2_048)
+            )
+            .subscribe(new Subscriber<ByteBuf>() {
+                @Override
+                public void onSubscribe(Subscription value) {
+                    subscription.set(value);
+                }
+
+                @Override
+                public void onNext(ByteBuf value) {
+                    received.incrementAndGet();
+                    ReferenceCountUtil.safeRelease(value);
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    failure.set(error);
+                    terminated.countDown();
+                }
+
+                @Override
+                public void onComplete() {
+                    terminated.countDown();
+                }
+            });
+
+        // bufferSize=1 splits the three-byte UTF-8 BOM into three chunks. The fourth demand
+        // reaches the cell source and leaves the rest of the encoded cell queued for cleanup.
+        subscription.get().request(4);
+        source.assertMinRequested(1);
+        source.next(cell(repeat('x', 1_024)));
+        assertEquals(4, received.get(), "fixture did not leave encoded chunks queued");
+        source.error(expected);
+
+        assertTrue(terminated.await(5, TimeUnit.SECONDS), "source error did not terminate output");
+        assertTrue(failure.get() == expected, "source error identity was not preserved");
+
+        assertTrue(allocator.allReleased(), "source error leaked queued ByteBuf instances");
     }
 
     @Test

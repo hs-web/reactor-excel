@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
@@ -197,7 +198,7 @@ class StreamUtilsTest {
                 @Override
                 public void onNext(byte[] value) {
                     onNextEntered.countDown();
-                    await(releaseOnNext);
+                    awaitUninterruptibly(releaseOnNext);
                 }
 
                 @Override
@@ -273,6 +274,181 @@ class StreamUtilsTest {
         assertTrue(writerFinished.await(5, TimeUnit.SECONDS),
                    "cancel should wake the blocked writer");
         assertTrue(allocator.allReleased(), "cancel path leaked a ByteBuf");
+    }
+
+    @Test
+    void cancellationBeforeFirstDemandShouldNotStartWriterOrAllocateBuffer() {
+        AtomicBoolean writerStarted = new AtomicBoolean();
+        TrackingAllocator allocator = new TrackingAllocator();
+
+        StepVerifier
+            .create(StreamUtils.buffer(
+                4,
+                allocator,
+                output -> Mono.fromRunnable(() -> writerStarted.set(true))
+            ), 0)
+            .expectSubscription()
+            .thenCancel()
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertFalse(writerStarted.get(), "writer started without downstream demand");
+        assertEquals(0, allocator.allocationCount(), "buffer allocated without downstream demand");
+    }
+
+    @Test
+    void byteBufBufferShouldReleaseCurrentBufferWhenWriterFails() {
+        TrackingAllocator allocator = new TrackingAllocator();
+        IllegalStateException expected = new IllegalStateException("writer failed");
+
+        StepVerifier
+            .create(StreamUtils.buffer(
+                4,
+                allocator,
+                output -> Mono
+                    .fromRunnable(() -> {
+                        try {
+                            output.write(new byte[]{1, 2, 3});
+                        } catch (IOException error) {
+                            throw new UncheckedIOException(error);
+                        }
+                    })
+                    .then(Mono.error(expected))
+            ))
+            .expectErrorMatches(error -> error == expected)
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertTrue(allocator.allReleased(), "writer error leaked the current ByteBuf");
+    }
+
+    @Test
+    void byteBufBufferShouldReleaseChunkWhenDownstreamOnNextThrows()
+        throws InterruptedException {
+        TrackingAllocator allocator = new TrackingAllocator();
+        CountDownLatch onNextCalled = new CountDownLatch(1);
+        CountDownLatch errorDropped = new CountDownLatch(1);
+        CountDownLatch writerFinished = new CountDownLatch(1);
+        AtomicInteger terminalSignals = new AtomicInteger();
+        AtomicReference<Throwable> droppedError = new AtomicReference<>();
+
+        Hooks.onErrorDropped(error -> {
+            droppedError.compareAndSet(null, error);
+            errorDropped.countDown();
+        });
+        try {
+            StreamUtils
+                .buffer(
+                    4,
+                    allocator,
+                    output -> Mono.fromRunnable(() -> {
+                        try {
+                            output.write(new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
+                        } catch (IOException error) {
+                            throw new UncheckedIOException(error);
+                        } finally {
+                            writerFinished.countDown();
+                        }
+                    })
+                )
+                .subscribe(new Subscriber<ByteBuf>() {
+                    @Override
+                    public void onSubscribe(Subscription subscription) {
+                        subscription.request(1);
+                    }
+
+                    @Override
+                    public void onNext(ByteBuf value) {
+                        onNextCalled.countDown();
+                        throw new IllegalStateException("downstream failed");
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        terminalSignals.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onComplete() {
+                        terminalSignals.incrementAndGet();
+                    }
+                });
+
+            assertTrue(onNextCalled.await(5, TimeUnit.SECONDS), "downstream callback did not run");
+            assertTrue(errorDropped.await(5, TimeUnit.SECONDS), "callback failure was not dropped");
+            assertTrue(writerFinished.await(5, TimeUnit.SECONDS),
+                       "writer did not stop after callback failure");
+        } finally {
+            Hooks.resetOnErrorDropped();
+        }
+
+        assertEquals("downstream failed", droppedError.get().getMessage());
+        assertEquals(0, terminalSignals.get(), "failing subscriber received another terminal signal");
+        assertTrue(allocator.allReleased(), "downstream callback failure leaked a ByteBuf");
+    }
+
+    @Test
+    void byteBufCancellationMustNotWaitForSlowDownstreamCallback() throws InterruptedException {
+        TrackingAllocator allocator = new TrackingAllocator();
+        CountDownLatch onNextEntered = new CountDownLatch(1);
+        CountDownLatch releaseOnNext = new CountDownLatch(1);
+        CountDownLatch writerFinished = new CountDownLatch(1);
+        CountDownLatch cancellationFinished = new CountDownLatch(1);
+        AtomicReference<Subscription> subscription = new AtomicReference<>();
+
+        StreamUtils
+            .buffer(
+                4,
+                allocator,
+                output -> Mono.fromRunnable(() -> {
+                    try {
+                        output.write(new byte[]{1, 2, 3, 4});
+                    } catch (IOException error) {
+                        throw new UncheckedIOException(error);
+                    } finally {
+                        writerFinished.countDown();
+                    }
+                })
+            )
+            .subscribe(new Subscriber<ByteBuf>() {
+                @Override
+                public void onSubscribe(Subscription value) {
+                    subscription.set(value);
+                    value.request(1);
+                }
+
+                @Override
+                public void onNext(ByteBuf value) {
+                    onNextEntered.countDown();
+                    try {
+                        awaitUninterruptibly(releaseOnNext);
+                    } finally {
+                        ReferenceCountUtil.safeRelease(value);
+                    }
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                }
+
+                @Override
+                public void onComplete() {
+                }
+            });
+
+        assertTrue(onNextEntered.await(5, TimeUnit.SECONDS), "downstream callback did not start");
+        Mono
+            .fromRunnable(subscription.get()::cancel)
+            .subscribeOn(Schedulers.parallel())
+            .doFinally(ignored -> cancellationFinished.countDown())
+            .subscribe();
+
+        try {
+            assertTrue(cancellationFinished.await(2, TimeUnit.SECONDS),
+                       "cancel waited for the ByteBuf callback");
+        } finally {
+            releaseOnNext.countDown();
+        }
+        assertTrue(writerFinished.await(5, TimeUnit.SECONDS));
+        assertTrue(allocator.allReleased(), "slow callback cancellation leaked a ByteBuf");
     }
 
     @Test
@@ -353,6 +529,23 @@ class StreamUtilsTest {
         }
     }
 
+    private static void awaitUninterruptibly(CountDownLatch latch) {
+        boolean interrupted = false;
+        for (; ; ) {
+            try {
+                if (!latch.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("timed out waiting for test signal");
+                }
+                break;
+            } catch (InterruptedException error) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     private static final class TrackingAllocator extends AbstractByteBufAllocator {
 
         private final ByteBufAllocator delegate = UnpooledByteBufAllocator.DEFAULT;
@@ -385,6 +578,10 @@ class StreamUtilsTest {
 
         private boolean allReleased() {
             return allocated.stream().allMatch(buffer -> buffer.refCnt() == 0);
+        }
+
+        private int allocationCount() {
+            return allocated.size();
         }
     }
 }
