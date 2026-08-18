@@ -1,18 +1,26 @@
 package org.hswebframework.reactor.excel.poi;
 
 import lombok.SneakyThrows;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.util.ReferenceCountUtil;
+import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.Workbook;
 import org.apache.poi.ss.usermodel.WorkbookFactory;
 import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellRangeAddress;
+import org.hswebframework.reactor.excel.BlockHoundTestSupport;
+import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.ReactorExcel;
+import org.hswebframework.reactor.excel.WritableCell;
 import org.hswebframework.reactor.excel.utils.StreamUtils;
 import org.hswebframework.reactor.excel.poi.options.AddNormalPullDownSheetOption;
 import org.hswebframework.reactor.excel.poi.options.PoiWriteOptions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 
@@ -20,16 +28,30 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PoiExcelWriterTest {
+
+    @BeforeAll
+    static void installBlockHound() {
+        BlockHoundTestSupport.install();
+    }
 
     @Test
     @SneakyThrows
@@ -154,6 +176,185 @@ class PoiExcelWriterTest {
         try (Workbook workbook = WorkbookFactory.create(new ByteArrayInputStream(bytes))) {
             assertEquals("ID", workbook.getSheetAt(0).getRow(0).getCell(0).getStringCellValue());
             assertEquals("1", workbook.getSheetAt(0).getRow(1).getCell(0).getStringCellValue());
+        }
+    }
+
+    @Test
+    void blockingWorkbookWriteShouldStayOffAsyncSourceThread() {
+        AtomicBoolean sourceWasNonBlocking = new AtomicBoolean();
+        AtomicBoolean cellMutationWasNonBlocking = new AtomicBoolean(true);
+        AtomicBoolean workbookWriteWasNonBlocking = new AtomicBoolean(true);
+        PoiExcelWriter writer = new PoiExcelWriter() {
+            @Override
+            protected void wrapCell(Cell poiCell, WritableCell cell) {
+                cellMutationWasNonBlocking.set(Schedulers.isInNonBlockingThread());
+                super.wrapCell(poiCell, cell);
+            }
+
+            @Override
+            protected void writeAndClose(Workbook workbook, java.io.OutputStream stream) {
+                workbookWriteWasNonBlocking.set(Schedulers.isInNonBlockingThread());
+                super.writeAndClose(workbook, stream);
+            }
+        };
+        Flux<WritableCell> source = Mono
+            .delay(java.time.Duration.ofMillis(10))
+            .map(ignore -> {
+                sourceWasNonBlocking.set(Schedulers.isInNonBlockingThread());
+                return WritableCell.of(0, 0, 0, CellDataType.STRING, "value", true);
+            })
+            .flux();
+
+        StepVerifier
+            .create(writer.write(source, UnpooledByteBufAllocator.DEFAULT, 1024))
+            .thenConsumeWhile(buffer -> {
+                ReferenceCountUtil.safeRelease(buffer);
+                return true;
+            })
+            .expectComplete()
+            .verify(java.time.Duration.ofSeconds(10));
+
+        assertTrue(sourceWasNonBlocking.get(), "fixture did not use an async non-blocking source");
+        assertFalse(cellMutationWasNonBlocking.get(),
+                    "POI cell mutation ran on a Reactor non-blocking thread");
+        assertFalse(workbookWriteWasNonBlocking.get(),
+                    "POI workbook.write ran on a Reactor non-blocking thread");
+    }
+
+    @Test
+    void cancellationShouldScheduleBlockingCleanup() throws InterruptedException {
+        CountDownLatch sourceSubscribed = new CountDownLatch(1);
+        CountDownLatch closeEntered = new CountDownLatch(1);
+        CountDownLatch releaseClose = new CountDownLatch(1);
+        CountDownLatch cancellationFinished = new CountDownLatch(1);
+        AtomicBoolean closeWasNonBlocking = new AtomicBoolean(true);
+        AtomicReference<Throwable> cancellationError = new AtomicReference<>();
+        OutputStream output = new OutputStream() {
+            @Override
+            public void write(int value) {
+            }
+
+            @Override
+            public void close() throws IOException {
+                closeWasNonBlocking.set(Schedulers.isInNonBlockingThread());
+                closeEntered.countDown();
+                try {
+                    if (!releaseClose.await(5, TimeUnit.SECONDS)) {
+                        throw new IOException("timed out waiting to release test output");
+                    }
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(error);
+                }
+            }
+        };
+        reactor.core.Disposable write = new PoiExcelWriter()
+            .write(Flux.<WritableCell>never().doOnSubscribe(ignore -> sourceSubscribed.countDown()), output)
+            .subscribe();
+
+        assertTrue(sourceSubscribed.await(5, TimeUnit.SECONDS), "POI source was not subscribed");
+        Mono
+            .fromRunnable(write::dispose)
+            .subscribeOn(Schedulers.parallel())
+            .subscribe(
+                ignore -> {
+                },
+                error -> {
+                    cancellationError.set(error);
+                    cancellationFinished.countDown();
+                },
+                cancellationFinished::countDown
+            );
+
+        try {
+            assertTrue(cancellationFinished.await(2, TimeUnit.SECONDS),
+                       "cancellation waited for blocking POI cleanup");
+            assertTrue(closeEntered.await(5, TimeUnit.SECONDS), "output cleanup did not start");
+            assertFalse(closeWasNonBlocking.get(), "output cleanup ran on a non-blocking thread");
+            assertNull(cancellationError.get());
+        } finally {
+            releaseClose.countDown();
+        }
+    }
+
+    @Test
+    void cancellationDuringResourceAcquisitionShouldCloseDiscardedResource()
+        throws InterruptedException {
+        CountDownLatch workbookCreated = new CountDownLatch(1);
+        CountDownLatch releaseCreation = new CountDownLatch(1);
+        CountDownLatch outputClosed = new CountDownLatch(1);
+        PoiExcelWriter writer = new PoiExcelWriter() {
+            @Override
+            protected Workbook createWorkBook() {
+                Workbook workbook = super.createWorkBook();
+                workbookCreated.countDown();
+                awaitUninterruptibly(releaseCreation);
+                return workbook;
+            }
+        };
+        OutputStream output = new OutputStream() {
+            @Override
+            public void write(int value) {
+            }
+
+            @Override
+            public void close() {
+                outputClosed.countDown();
+            }
+        };
+        reactor.core.Disposable write = writer
+            .write(Flux.<WritableCell>never(), output)
+            .subscribe();
+
+        assertTrue(workbookCreated.await(5, TimeUnit.SECONDS), "POI workbook was not created");
+        write.dispose();
+        releaseCreation.countDown();
+
+        assertTrue(outputClosed.await(5, TimeUnit.SECONDS),
+                   "resource discarded during acquisition was not closed");
+    }
+
+    @Test
+    void resourceCreationFailureShouldCloseOutput() {
+        AtomicBoolean outputClosed = new AtomicBoolean();
+        OutputStream output = new OutputStream() {
+            @Override
+            public void write(int value) {
+            }
+
+            @Override
+            public void close() {
+                outputClosed.set(true);
+            }
+        };
+        PoiExcelWriter writer = new PoiExcelWriter() {
+            @Override
+            protected Workbook createWorkBook() {
+                throw new IllegalStateException("workbook creation failed");
+            }
+        };
+
+        StepVerifier
+            .create(writer.write(Flux.empty(), output))
+            .expectErrorMatches(error -> error instanceof IllegalStateException
+                && "workbook creation failed".equals(error.getMessage()))
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertTrue(outputClosed.get(), "resource creation failure did not close the output");
+    }
+
+    private static void awaitUninterruptibly(CountDownLatch latch) {
+        boolean interrupted = false;
+        for (; ; ) {
+            try {
+                latch.await();
+                break;
+            } catch (InterruptedException error) {
+                interrupted = true;
+            }
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 

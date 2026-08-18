@@ -18,7 +18,10 @@ import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Objects;
-import java.util.concurrent.locks.Condition;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -26,13 +29,27 @@ import java.util.function.Function;
 /**
  * Blocking {@link OutputStream} to reactive chunks adapter.
  *
- * <p>The writer is isolated on {@link Schedulers#boundedElastic()}. A full chunk waits for
- * downstream demand instead of entering an unbounded Reactor queue. Cancellation wakes the
- * blocked writer and releases every chunk that has not been transferred to the downstream.</p>
+ * <p>The writer starts on first demand and its subscription is isolated on
+ * {@link Schedulers#boundedElastic()}. A full chunk waits for downstream demand instead of entering
+ * an unbounded Reactor queue. Asynchronous writer publishers must keep every {@link OutputStream}
+ * access on a blocking-capable thread; misuse from a Reactor non-blocking thread fails fast.
+ * Cancellation never waits for the writer or downstream callback and releases chunks that have not
+ * been transferred to the downstream.</p>
  */
 @Slf4j
 public class StreamUtils {
 
+    /**
+     * Adapt a blocking output writer to bounded byte-array chunks.
+     *
+     * <p>The writer starts when the downstream first requests data. Synchronous callback setup is
+     * moved to {@link Schedulers#boundedElastic()}, while asynchronous callbacks remain responsible
+     * for keeping every {@link OutputStream} operation on a blocking-capable thread.</p>
+     *
+     * @param bufferSize maximum size of each emitted array
+     * @param streamConsumer blocking writer callback
+     * @return cold demand-aware byte stream
+     */
     public static Flux<byte[]> buffer(int bufferSize,
                                       Function<OutputStream, Mono<Void>> streamConsumer) {
         checkBufferSize(bufferSize);
@@ -77,49 +94,17 @@ public class StreamUtils {
             DemandEmitter<T> emitter = new DemandEmitter<>(sink, releaser);
             ManagedOutputStream stream = streamFactory.apply(emitter);
             Disposable.Composite resources = Disposables.composite();
+            WriterTask<T> writer = new WriterTask<>(
+                streamConsumer,
+                sink,
+                emitter,
+                stream,
+                resources
+            );
 
-            sink.onRequest(emitter::request);
             resources.add(stream::cancel);
             sink.onDispose(resources);
-
-            // The callback can write synchronously during subscription. Offloading the whole
-            // subscription prevents a zero-demand subscriber from deadlocking subscribe().
-            Disposable writer = Mono
-                .defer(() -> Objects.requireNonNull(
-                    streamConsumer.apply(stream),
-                    "streamConsumer returned null"
-                ))
-                .onErrorResume(error -> {
-                    if (emitter.isCancelled() || sink.isCancelled()) {
-                        return Mono.empty();
-                    }
-                    return Mono.error(error);
-                })
-                .subscribeOn(Schedulers.boundedElastic())
-                .subscribe(
-                    ignore -> {
-                    },
-                    error -> {
-                        boolean cancelled = emitter.isCancelled() || sink.isCancelled();
-                        stream.cancel();
-                        if (!cancelled && !sink.isCancelled()) {
-                            sink.error(error);
-                        }
-                    },
-                    () -> {
-                        try {
-                            stream.finish();
-                        } catch (Throwable error) {
-                            boolean cancelled = emitter.isCancelled() || sink.isCancelled();
-                            stream.cancel();
-                            if (!cancelled && !sink.isCancelled()) {
-                                sink.error(error);
-                            }
-                        }
-                    },
-                    Context.of(sink.contextView())
-                );
-            resources.add(writer);
+            sink.onRequest(writer::request);
         }, FluxSink.OverflowStrategy.ERROR);
     }
 
@@ -160,6 +145,14 @@ public class StreamUtils {
 
     private abstract static class ManagedOutputStream extends OutputStream {
 
+        final void ensureBlockingThread() {
+            if (Schedulers.isInNonBlockingThread()) {
+                throw new IllegalStateException(
+                    "Blocking OutputStream cannot be used from a Reactor non-blocking thread"
+                );
+            }
+        }
+
         // close() only seals writes. The producer publisher owns the terminal signal so an
         // error after close cannot be misreported as successful completion.
         abstract void finish() throws IOException;
@@ -167,21 +160,123 @@ public class StreamUtils {
         abstract void cancel();
     }
 
+    /**
+     * Starts one writer subscription after the first positive request and owns its terminal path.
+     */
+    private static final class WriterTask<T> {
+
+        private final Function<OutputStream, Mono<Void>> streamConsumer;
+
+        private final FluxSink<T> sink;
+
+        private final DemandEmitter<T> emitter;
+
+        private final ManagedOutputStream stream;
+
+        private final Disposable.Composite resources;
+
+        private final AtomicBoolean started = new AtomicBoolean();
+
+        private WriterTask(Function<OutputStream, Mono<Void>> streamConsumer,
+                           FluxSink<T> sink,
+                           DemandEmitter<T> emitter,
+                           ManagedOutputStream stream,
+                           Disposable.Composite resources) {
+            this.streamConsumer = streamConsumer;
+            this.sink = sink;
+            this.emitter = emitter;
+            this.stream = stream;
+            this.resources = resources;
+        }
+
+        private void request(long count) {
+            emitter.request(count);
+            if (count > 0 && started.compareAndSet(false, true)) {
+                start();
+            }
+        }
+
+        private void start() {
+            if (emitter.isCancelled() || sink.isCancelled()) {
+                return;
+            }
+            // Synchronous callback setup belongs to boundedElastic. An asynchronous callback can
+            // change threads later and must keep OutputStream access on a blocking-capable thread.
+            Disposable subscription = Mono
+                .defer(() -> Objects.requireNonNull(
+                    streamConsumer.apply(stream),
+                    "streamConsumer returned null"
+                ))
+                .onErrorResume(error -> {
+                    if (emitter.isCancelled() || sink.isCancelled()) {
+                        return Mono.empty();
+                    }
+                    return Mono.error(error);
+                })
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(
+                    ignore -> {
+                    },
+                    this::error,
+                    this::complete,
+                    Context.of(sink.contextView())
+                );
+            resources.add(subscription);
+        }
+
+        private void error(Throwable error) {
+            boolean cancelled = emitter.isCancelled() || sink.isCancelled();
+            stream.cancel();
+            if (!cancelled && !sink.isCancelled()) {
+                sink.error(error);
+            }
+        }
+
+        private void complete() {
+            try {
+                stream.finish();
+            } catch (Throwable error) {
+                boolean cancelled = emitter.isCancelled() || sink.isCancelled();
+                stream.cancel();
+                if (!cancelled && !sink.isCancelled()) {
+                    sink.error(error);
+                }
+            }
+        }
+    }
+
+    /**
+     * Single-writer demand gate. Request and cancellation are lock-free; only the bounded-elastic
+     * writer may park while no demand is available.
+     */
     private static final class DemandEmitter<T> {
+
+        private static final int ACTIVE = 0;
+
+        private static final int CANCELLED = 1;
+
+        private static final int TERMINATED = 2;
+
+        private static final AtomicLongFieldUpdater<DemandEmitter> REQUESTED =
+            AtomicLongFieldUpdater.newUpdater(DemandEmitter.class, "requested");
+
+        private static final AtomicIntegerFieldUpdater<DemandEmitter> STATE =
+            AtomicIntegerFieldUpdater.newUpdater(DemandEmitter.class, "state");
+
+        private static final AtomicIntegerFieldUpdater<DemandEmitter> EMITTING =
+            AtomicIntegerFieldUpdater.newUpdater(DemandEmitter.class, "emitting");
 
         private final FluxSink<T> sink;
 
         private final Consumer<T> releaser;
 
-        private final ReentrantLock lock = new ReentrantLock();
+        private volatile long requested;
 
-        private final Condition demandChanged = lock.newCondition();
+        private volatile int state;
 
-        private long requested;
+        private volatile int emitting;
 
-        private boolean cancelled;
-
-        private boolean terminated;
+        private volatile Thread waiter;
 
         private DemandEmitter(FluxSink<T> sink, Consumer<T> releaser) {
             this.sink = sink;
@@ -189,92 +284,99 @@ public class StreamUtils {
         }
 
         private void request(long count) {
-            if (count <= 0) {
+            if (count <= 0 || state != ACTIVE) {
                 return;
             }
-            lock.lock();
-            try {
-                if (cancelled || terminated) {
-                    return;
-                }
-                requested = addCap(requested, count);
-                demandChanged.signalAll();
-            } finally {
-                lock.unlock();
-            }
+            addCap(count);
+            unparkWriter();
         }
 
         private void emit(T value) throws IOException {
-            lock.lock();
+            if (!EMITTING.compareAndSet(this, 0, 1)) {
+                releaser.accept(value);
+                throw new IOException("Concurrent OutputStream writes are not supported");
+            }
             try {
-                while (requested == 0 && !cancelled && !terminated) {
-                    try {
-                        demandChanged.await();
-                    } catch (InterruptedException error) {
-                        Thread.currentThread().interrupt();
-                        releaser.accept(value);
-                        InterruptedIOException interrupted = new InterruptedIOException(
-                            "Interrupted while waiting for downstream demand"
-                        );
-                        interrupted.initCause(error);
-                        throw interrupted;
-                    }
+                if (Schedulers.isInNonBlockingThread()) {
+                    releaser.accept(value);
+                    throw new IllegalStateException(
+                        "Blocking OutputStream cannot emit from a Reactor non-blocking thread"
+                    );
                 }
-                if (cancelled || terminated) {
+                awaitDemand(value);
+                if (state != ACTIVE || sink.isCancelled()) {
                     releaser.accept(value);
                     throw new IOException("Output stream was cancelled");
                 }
-                if (requested != Long.MAX_VALUE) {
-                    requested--;
-                }
-                // Keep cancellation serialized with sink.next. If cancellation wins between
-                // the demand check and delivery, a reference-counted chunk could otherwise be
-                // dropped without passing through the discard hook.
+                // Demand is reserved before this callback. No adapter lock is held while invoking
+                // downstream, so request and cancel remain non-blocking even for a slow subscriber.
                 sink.next(value);
             } finally {
-                lock.unlock();
+                EMITTING.set(this, 0);
+            }
+        }
+
+        private void awaitDemand(T value) throws IOException {
+            for (; ; ) {
+                if (state != ACTIVE || sink.isCancelled()) {
+                    return;
+                }
+                long current = requested;
+                if (current == Long.MAX_VALUE
+                    || (current > 0 && REQUESTED.compareAndSet(this, current, current - 1))) {
+                    return;
+                }
+
+                waiter = Thread.currentThread();
+                if (requested == 0 && state == ACTIVE && !sink.isCancelled()) {
+                    LockSupport.park(this);
+                }
+                waiter = null;
+                if (Thread.interrupted()) {
+                    releaser.accept(value);
+                    InterruptedIOException interrupted = new InterruptedIOException(
+                        "Interrupted while waiting for downstream demand"
+                    );
+                    throw interrupted;
+                }
             }
         }
 
         private void complete() {
-            lock.lock();
-            try {
-                if (cancelled || terminated) {
-                    return;
-                }
-                terminated = true;
-                demandChanged.signalAll();
-            } finally {
-                lock.unlock();
+            if (STATE.compareAndSet(this, ACTIVE, TERMINATED)) {
+                unparkWriter();
+                sink.complete();
             }
-            sink.complete();
         }
 
         private void cancel() {
-            lock.lock();
-            try {
-                if (cancelled) {
-                    return;
-                }
-                cancelled = true;
-                demandChanged.signalAll();
-            } finally {
-                lock.unlock();
+            if (STATE.compareAndSet(this, ACTIVE, CANCELLED)) {
+                unparkWriter();
             }
         }
 
         private boolean isCancelled() {
-            lock.lock();
-            try {
-                return cancelled;
-            } finally {
-                lock.unlock();
+            return state == CANCELLED;
+        }
+
+        private void addCap(long increment) {
+            for (; ; ) {
+                long current = requested;
+                if (current == Long.MAX_VALUE) {
+                    return;
+                }
+                long updated = current + increment;
+                if (updated < 0) {
+                    updated = Long.MAX_VALUE;
+                }
+                if (REQUESTED.compareAndSet(this, current, updated)) {
+                    return;
+                }
             }
         }
 
-        private static long addCap(long current, long increment) {
-            long updated = current + increment;
-            return updated < 0 ? Long.MAX_VALUE : updated;
+        private void unparkWriter() {
+            LockSupport.unpark(waiter);
         }
     }
 
@@ -286,34 +388,37 @@ public class StreamUtils {
 
         private final ReentrantLock lock = new ReentrantLock();
 
+        private final AtomicBoolean cleanupRequested = new AtomicBoolean();
+
         private byte[] buffer;
 
         private int position;
 
-        private boolean closed;
+        private volatile boolean closed;
 
         private ByteArrayOutputStream(int bufferSize, DemandEmitter<byte[]> emitter) {
             this.bufferSize = bufferSize;
             this.emitter = emitter;
-            this.buffer = new byte[bufferSize];
         }
 
         @Override
         public void write(int value) throws IOException {
+            ensureBlockingThread();
             byte[] full;
             lock.lock();
             try {
                 ensureOpen();
-                buffer[position++] = (byte) value;
+                current()[position++] = (byte) value;
                 full = detachIfFull();
             } finally {
-                lock.unlock();
+                unlockWriter();
             }
             emit(full);
         }
 
         @Override
         public void write(byte[] source, int offset, int length) throws IOException {
+            ensureBlockingThread();
             checkBounds(source, offset, length);
             while (length > 0) {
                 byte[] full;
@@ -321,13 +426,13 @@ public class StreamUtils {
                 try {
                     ensureOpen();
                     int copyLength = Math.min(length, bufferSize - position);
-                    System.arraycopy(source, offset, buffer, position, copyLength);
+                    System.arraycopy(source, offset, current(), position, copyLength);
                     position += copyLength;
                     offset += copyLength;
                     length -= copyLength;
                     full = detachIfFull();
                 } finally {
-                    lock.unlock();
+                    unlockWriter();
                 }
                 emit(full);
             }
@@ -335,21 +440,24 @@ public class StreamUtils {
 
         @Override
         public void flush() throws IOException {
+            ensureBlockingThread();
             emit(detachPartial());
         }
 
         @Override
         public void close() {
+            ensureBlockingThread();
             lock.lock();
             try {
                 closed = true;
             } finally {
-                lock.unlock();
+                unlockWriter();
             }
         }
 
         @Override
         void finish() throws IOException {
+            ensureBlockingThread();
             byte[] partial;
             lock.lock();
             try {
@@ -358,7 +466,7 @@ public class StreamUtils {
                 position = 0;
                 buffer = null;
             } finally {
-                lock.unlock();
+                unlockWriter();
             }
             emit(partial);
             emitter.complete();
@@ -367,14 +475,18 @@ public class StreamUtils {
         @Override
         void cancel() {
             emitter.cancel();
-            lock.lock();
-            try {
-                closed = true;
-                position = 0;
-                buffer = null;
-            } finally {
-                lock.unlock();
+            closed = true;
+            // Never wait on a writer-owned lock from request/cancel threads. The writer retries
+            // deferred cleanup immediately after leaving its short critical section.
+            cleanupRequested.set(true);
+            cleanupIfRequested();
+        }
+
+        private byte[] current() {
+            if (buffer == null) {
+                buffer = new byte[bufferSize];
             }
+            return buffer;
         }
 
         private byte[] detachIfFull() {
@@ -382,7 +494,7 @@ public class StreamUtils {
                 return null;
             }
             byte[] full = buffer;
-            buffer = new byte[bufferSize];
+            buffer = null;
             position = 0;
             return full;
         }
@@ -397,6 +509,25 @@ public class StreamUtils {
                 byte[] partial = Arrays.copyOf(buffer, position);
                 position = 0;
                 return partial;
+            } finally {
+                unlockWriter();
+            }
+        }
+
+        private void unlockWriter() {
+            lock.unlock();
+            cleanupIfRequested();
+        }
+
+        private void cleanupIfRequested() {
+            if (!cleanupRequested.get() || !lock.tryLock()) {
+                return;
+            }
+            try {
+                if (cleanupRequested.compareAndSet(true, false)) {
+                    position = 0;
+                    buffer = null;
+                }
             } finally {
                 lock.unlock();
             }
@@ -425,9 +556,11 @@ public class StreamUtils {
 
         private final ReentrantLock lock = new ReentrantLock();
 
+        private final AtomicBoolean cleanupRequested = new AtomicBoolean();
+
         private ByteBuf buffer;
 
-        private boolean closed;
+        private volatile boolean closed;
 
         private ByteBufOutputStream(int bufferSize,
                                     ByteBufAllocator allocator,
@@ -439,6 +572,7 @@ public class StreamUtils {
 
         @Override
         public void write(int value) throws IOException {
+            ensureBlockingThread();
             ByteBuf full;
             lock.lock();
             try {
@@ -446,13 +580,14 @@ public class StreamUtils {
                 current().writeByte(value);
                 full = detachIfFull();
             } finally {
-                lock.unlock();
+                unlockWriter();
             }
             emit(full);
         }
 
         @Override
         public void write(byte[] source, int offset, int length) throws IOException {
+            ensureBlockingThread();
             checkBounds(source, offset, length);
             while (length > 0) {
                 ByteBuf full;
@@ -466,7 +601,7 @@ public class StreamUtils {
                     length -= copyLength;
                     full = detachIfFull();
                 } finally {
-                    lock.unlock();
+                    unlockWriter();
                 }
                 emit(full);
             }
@@ -474,21 +609,24 @@ public class StreamUtils {
 
         @Override
         public void flush() throws IOException {
+            ensureBlockingThread();
             emit(detachPartial());
         }
 
         @Override
         public void close() {
+            ensureBlockingThread();
             lock.lock();
             try {
                 closed = true;
             } finally {
-                lock.unlock();
+                unlockWriter();
             }
         }
 
         @Override
         void finish() throws IOException {
+            ensureBlockingThread();
             ByteBuf partial;
             lock.lock();
             try {
@@ -496,7 +634,7 @@ public class StreamUtils {
                 partial = buffer;
                 buffer = null;
             } finally {
-                lock.unlock();
+                unlockWriter();
             }
             emit(partial);
             emitter.complete();
@@ -505,16 +643,11 @@ public class StreamUtils {
         @Override
         void cancel() {
             emitter.cancel();
-            ByteBuf discarded;
-            lock.lock();
-            try {
-                closed = true;
-                discarded = buffer;
-                buffer = null;
-            } finally {
-                lock.unlock();
-            }
-            ReferenceCountUtil.safeRelease(discarded);
+            closed = true;
+            // ByteBuf release is serialized with writes, but cancellation only uses tryLock. If a
+            // write owns the lock, it observes this flag and performs the release after unlocking.
+            cleanupRequested.set(true);
+            cleanupIfRequested();
         }
 
         private ByteBuf current() {
@@ -541,8 +674,29 @@ public class StreamUtils {
                 buffer = null;
                 return partial;
             } finally {
+                unlockWriter();
+            }
+        }
+
+        private void unlockWriter() {
+            lock.unlock();
+            cleanupIfRequested();
+        }
+
+        private void cleanupIfRequested() {
+            if (!cleanupRequested.get() || !lock.tryLock()) {
+                return;
+            }
+            ByteBuf discarded = null;
+            try {
+                if (cleanupRequested.compareAndSet(true, false)) {
+                    discarded = buffer;
+                    buffer = null;
+                }
+            } finally {
                 lock.unlock();
             }
+            ReferenceCountUtil.safeRelease(discarded);
         }
 
         private void ensureOpen() throws IOException {

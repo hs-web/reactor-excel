@@ -52,8 +52,15 @@ public interface ExcelWriter {
      * Serialize cells into bounded reference-counted chunks.
      *
      * <p>The default implementation adapts the blocking {@link OutputStream} contract and may
-     * block a bounded-elastic worker while waiting for demand. Native reactive writers should
-     * override this method and directly coordinate demand with {@code dataStream}.</p>
+     * block a bounded-elastic worker while waiting for demand. Serialization starts on the first
+     * downstream request; request and cancellation callbacks do not wait for the blocking writer.
+     * Native reactive writers should override this method and directly coordinate demand with
+     * {@code dataStream}.</p>
+     *
+     * <p>A blocking serializer may need to consume its cell source before it can produce the first
+     * byte chunk, so this adapter bounds encoded bytes but cannot add cell-level backpressure to
+     * such a format. Implementations whose source callbacks can hop threads must also keep all
+     * {@link OutputStream} access off Reactor non-blocking threads.</p>
      *
      * @param dataStream ordered cells to serialize
      * @param allocator allocator for output buffers

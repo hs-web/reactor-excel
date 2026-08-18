@@ -128,6 +128,82 @@ class ReactiveExportStress {
     }
 
     @Test
+    void streamUtilsConcurrentRequestAndCancelShouldNotDeadlockOrLeak() throws Exception {
+        int iterations = positiveIntProperty("reactor.excel.stress.raceIterations", 1_000);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < iterations; i++) {
+                TrackingAllocator allocator = new TrackingAllocator();
+                AtomicReference<Subscription> subscription = new AtomicReference<>();
+                AtomicReference<Throwable> raceError = new AtomicReference<>();
+                CountDownLatch firstChunk = new CountDownLatch(1);
+                CountDownLatch writerFinished = new CountDownLatch(1);
+                CountDownLatch start = new CountDownLatch(1);
+
+                StreamUtils
+                    .buffer(
+                        64,
+                        allocator,
+                        output -> Mono.fromRunnable(() -> {
+                            try {
+                                output.write(new byte[128]);
+                            } catch (IOException error) {
+                                throw new UncheckedIOException(error);
+                            } finally {
+                                writerFinished.countDown();
+                            }
+                        })
+                    )
+                    .subscribe(new Subscriber<ByteBuf>() {
+                        @Override
+                        public void onSubscribe(Subscription value) {
+                            subscription.set(value);
+                        }
+
+                        @Override
+                        public void onNext(ByteBuf value) {
+                            ReferenceCountUtil.safeRelease(value);
+                            firstChunk.countDown();
+                        }
+
+                        @Override
+                        public void onError(Throwable error) {
+                            raceError.compareAndSet(null, error);
+                        }
+
+                        @Override
+                        public void onComplete() {
+                        }
+                    });
+
+                subscription.get().request(1);
+                assertTrue(firstChunk.await(5, TimeUnit.SECONDS),
+                           "first StreamUtils chunk timed out at iteration " + i);
+
+                Future<?> request = executor.submit(() -> {
+                    await(start);
+                    subscription.get().request(1);
+                });
+                Future<?> cancel = executor.submit(() -> {
+                    await(start);
+                    subscription.get().cancel();
+                });
+                start.countDown();
+                request.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                cancel.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                assertTrue(writerFinished.await(5, TimeUnit.SECONDS),
+                           "StreamUtils writer did not stop at iteration " + i);
+                assertNull(raceError.get(), "request/cancel race failed at iteration " + i);
+                assertTrue(allocator.allReleased(),
+                           "request/cancel race leaked a ByteBuf at iteration " + i);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     void csvShouldKeepRequestsAndByteBufMemoryBoundedWithSlowConsumer() throws InterruptedException {
         int rows = positiveIntProperty("reactor.excel.stress.csvRows", 100_000);
         long maxHeapGrowth = maxHeapGrowthBytes();

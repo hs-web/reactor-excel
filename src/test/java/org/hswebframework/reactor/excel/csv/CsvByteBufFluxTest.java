@@ -5,6 +5,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.util.ReferenceCountUtil;
+import org.hswebframework.reactor.excel.BlockHoundTestSupport;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.WritableCell;
 import org.hswebframework.reactor.excel.converter.SimpleWritableCell;
@@ -13,7 +14,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
-import reactor.blockhound.BlockHound;
 import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -42,7 +42,7 @@ class CsvByteBufFluxTest {
 
     @BeforeAll
     static void installBlockHound() {
-        BlockHound.install();
+        BlockHoundTestSupport.install();
         encoderExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "csv-blocking-cell-test");
             thread.setDaemon(true);
