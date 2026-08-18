@@ -518,6 +518,52 @@ class StreamUtilsTest {
         assertArrayEquals(new byte[]{9}, result.get(1));
     }
 
+    @Test
+    void byteBufChunksShouldRemainStableAndIndependentWhenAccumulated() {
+        TrackingAllocator allocator = new TrackingAllocator();
+        List<ByteBuf> buffers = StreamUtils
+            .buffer(
+                4,
+                allocator,
+                output -> Mono.fromRunnable(() -> {
+                    try {
+                        output.write(new byte[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
+                    } catch (IOException error) {
+                        throw new UncheckedIOException(error);
+                    }
+                })
+            )
+            // The source is deliberately fixed at three chunks so delayed inspection is bounded.
+            .collectList()
+            .block(java.time.Duration.ofSeconds(5));
+
+        try {
+            assertNotNull(buffers);
+            assertEquals(3, buffers.size());
+            assertArrayEquals(new byte[]{1, 2, 3, 4}, copyReadableBytes(buffers.get(0)));
+            assertArrayEquals(new byte[]{5, 6, 7, 8}, copyReadableBytes(buffers.get(1)));
+            assertArrayEquals(new byte[]{9, 10, 11, 12}, copyReadableBytes(buffers.get(2)));
+
+            buffers.get(0).setByte(buffers.get(0).readerIndex(), 99);
+
+            assertArrayEquals(new byte[]{99, 2, 3, 4}, copyReadableBytes(buffers.get(0)));
+            assertArrayEquals(new byte[]{5, 6, 7, 8}, copyReadableBytes(buffers.get(1)));
+            assertArrayEquals(new byte[]{9, 10, 11, 12}, copyReadableBytes(buffers.get(2)));
+        } finally {
+            if (buffers != null) {
+                buffers.forEach(ReferenceCountUtil::safeRelease);
+            }
+        }
+
+        assertTrue(allocator.allReleased(), "accumulated chunks retained a backing buffer");
+    }
+
+    private static byte[] copyReadableBytes(ByteBuf buffer) {
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.getBytes(buffer.readerIndex(), bytes);
+        return bytes;
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) {

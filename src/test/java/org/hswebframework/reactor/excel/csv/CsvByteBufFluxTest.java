@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -289,6 +290,48 @@ class CsvByteBufFluxTest {
     }
 
     @Test
+    void retainedSlicesShouldNotCorruptEachOtherDuringDelayedConsumption() {
+        TrackingAllocator allocator = new TrackingAllocator();
+        List<ByteBuf> buffers = new CsvWriter()
+            .write(
+                Flux.just(cell("abcdefgh")),
+                allocator,
+                4,
+                new CharsetOption(java.nio.charset.StandardCharsets.UTF_8),
+                MaxEncodedCellBytesOption.of(64)
+            )
+            // BOM plus one fixed-size cell keeps delayed inspection strictly bounded.
+            .collectList()
+            .block(Duration.ofSeconds(5));
+
+        try {
+            assertNotNull(buffers);
+            assertEquals(4, buffers.size());
+            assertArrayEquals(
+                new byte[]{(byte) 0xef, (byte) 0xbb, (byte) 0xbf},
+                copyReadableBytes(buffers.get(0))
+            );
+            assertArrayEquals(new byte[]{'a', 'b', 'c', 'd'}, copyReadableBytes(buffers.get(1)));
+            assertArrayEquals(new byte[]{'e', 'f', 'g', 'h'}, copyReadableBytes(buffers.get(2)));
+            assertArrayEquals(new byte[]{'\r', '\n'}, copyReadableBytes(buffers.get(3)));
+            assertSame(buffers.get(1).unwrap(), buffers.get(2).unwrap(),
+                       "fixture did not exercise retained slices from the same parent");
+
+            buffers.get(1).setByte(buffers.get(1).readerIndex(), 'X');
+
+            assertArrayEquals(new byte[]{'X', 'b', 'c', 'd'}, copyReadableBytes(buffers.get(1)));
+            assertArrayEquals(new byte[]{'e', 'f', 'g', 'h'}, copyReadableBytes(buffers.get(2)));
+            assertArrayEquals(new byte[]{'\r', '\n'}, copyReadableBytes(buffers.get(3)));
+        } finally {
+            if (buffers != null) {
+                buffers.forEach(ReferenceCountUtil::safeRelease);
+            }
+        }
+
+        assertTrue(allocator.allReleased(), "retained slices kept their parent buffer alive");
+    }
+
+    @Test
     void cancellationMustNotBlockAReactorNonBlockingThread() throws InterruptedException {
         TrackingAllocator allocator = new TrackingAllocator();
         CountDownLatch encodingStarted = new CountDownLatch(1);
@@ -347,6 +390,12 @@ class CsvByteBufFluxTest {
         char[] chars = new char[count];
         java.util.Arrays.fill(chars, value);
         return new String(chars);
+    }
+
+    private static byte[] copyReadableBytes(ByteBuf buffer) {
+        byte[] bytes = new byte[buffer.readableBytes()];
+        buffer.getBytes(buffer.readerIndex(), bytes);
+        return bytes;
     }
 
     private static final class BlockingCell extends SimpleWritableCell {
