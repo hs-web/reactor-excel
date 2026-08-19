@@ -69,7 +69,7 @@ CSV 只为 UTF-8、UTF-16BE/LE 和 UTF-32BE/LE 显式写入 BOM；`UTF-16` 使�
 
 CSV 响应式路径不会等待竞争锁，也不会自动切换 scheduler；cell 转换和编码在上游发送信号的线程同步执行。因此 `WritableCell.valueAsText()` 必须保持非阻塞；若自定义 cell 转换可能阻塞或需要隔离 Netty event loop，应由调用方在数据源上设置合适的 Reactor 调度边界。
 
-`StreamUtils` 在首次下游 demand 到达后才启动阻塞 writer，最多保留一个待交付分块；request 和 cancel 不会等待 writer 或下游回调。默认使用共享 `boundedElastic`，每个等待慢消费者的活跃 writer 可能长期占用一个 worker，并影响进程内其他阻塞任务。可通过 `BlockingSchedulerOption.of(scheduler)` 为 `ExcelWriter`/POI 注入专用 Scheduler，或直接调用 `StreamUtils.buffer(..., scheduler, ...)`；Scheduler 必须使用可阻塞线程，生命周期由调用方管理，并至少保持到导出流终止。若 `streamConsumer` 返回的异步 Publisher 后续切换到 Reactor non-blocking 线程，过渡期内每个订阅只记录一次包含首个外部调用位置的警告：已有 demand 可立即获取时允许继续，没有 demand、即将等待时仍会失败，绝不会 park event loop。显式配置 non-blocking Scheduler 和 POI 阻塞操作继续保持 fail-fast。
+`StreamUtils` 在首次下游 demand 到达后才启动阻塞 writer，最多保留一个待交付分块；request 和 cancel 不会等待 writer 或下游回调。默认使用共享 `boundedElastic`，每个等待慢消费者的活跃 writer 可能长期占用一个 worker，并影响进程内其他阻塞任务。可通过 `BlockingSchedulerOption.of(scheduler)` 为 `ExcelWriter`/POI 注入专用 Scheduler，或直接调用 `StreamUtils.buffer(..., scheduler, ...)`；Scheduler 必须使用可阻塞线程，生命周期由调用方管理，并至少保持到导出流终止。若 `streamConsumer` 返回的异步 Publisher 后续切换到 Reactor non-blocking 线程，过渡期内每个订阅只记录一次携带完整运行时调用栈的警告；该诊断异常只写日志、不会传播。已有 demand 可立即获取时允许继续，没有 demand、即将等待时仍会失败，绝不会 park event loop。显式配置 non-blocking Scheduler 和 POI 阻塞操作继续保持 fail-fast。
 
 POI 必须先构建工作簿才能产生 XLSX 字节，因此首次 byte demand 会启动写入，但后续 byte demand 无法逐项约束 `WritableCell` 数据源。POI 路径通过 prefetch 1 的调度边界限制 cell 在途数量，并通过 SXSSF 的窗口/临时文件控制工作簿内存；需要 byte demand 直接控制源数据请求时应使用原生响应式 CSV 路径。
 

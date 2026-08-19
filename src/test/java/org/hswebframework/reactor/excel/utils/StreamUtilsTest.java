@@ -285,17 +285,25 @@ class StreamUtilsTest {
                         .expectComplete()
                         .verify(java.time.Duration.ofSeconds(5));
 
-            List<String> warnings = appender.list
+            List<ILoggingEvent> warnings = appender.list
                 .stream()
                 .filter(event -> event.getLevel() == Level.WARN)
-                .map(ILoggingEvent::getFormattedMessage)
-                .filter(message -> message
+                .filter(event -> event
+                    .getFormattedMessage()
                     .contains("Blocking OutputStream accessed from Reactor non-blocking thread"))
                 .collect(java.util.stream.Collectors.toList());
             assertEquals(1, warnings.size(),
                 "non-blocking access should warn once per subscription");
-            assertTrue(warnings.get(0).contains("StreamUtilsTest.java:"),
-                "warning should identify the external call site: " + warnings.get(0));
+            ILoggingEvent warning = warnings.get(0);
+            assertNotNull(warning.getThrowableProxy(),
+                "warning should include the complete runtime access stack");
+            assertTrue(Arrays
+                .stream(warning.getThrowableProxy().getStackTraceElementProxyArray())
+                .anyMatch(frame -> frame
+                    .getStackTraceElement()
+                    .getClassName()
+                    .equals(StreamUtilsTest.class.getName())),
+                "diagnostic stack should include the external writer call");
         } finally {
             logger.detachAppender(appender);
             appender.stop();
