@@ -123,11 +123,15 @@ class StreamUtilsTest {
         AtomicReference<Throwable> dropped = new AtomicReference<>();
         AtomicReference<Subscription> subscription = new AtomicReference<>();
         CountDownLatch writerSubscribed = new CountDownLatch(1);
+        CountDownLatch errorDropped = new CountDownLatch(1);
         TestPublisher<Void> writer = TestPublisher.createNoncompliant(
             TestPublisher.Violation.DEFER_CANCELLATION
         );
 
-        Hooks.onErrorDropped(dropped::set);
+        Hooks.onErrorDropped(error -> {
+            dropped.set(error);
+            errorDropped.countDown();
+        });
         try {
             StreamUtils
                 .buffer(4, output -> writer.mono()
@@ -156,6 +160,8 @@ class StreamUtilsTest {
                        "blocking writer publisher was not subscribed");
             subscription.get().cancel();
             writer.error(expected);
+            assertTrue(errorDropped.await(5, TimeUnit.SECONDS),
+                       "writer error was not routed to onErrorDropped");
             assertEquals(expected, dropped.get());
         } finally {
             Hooks.resetOnErrorDropped();
