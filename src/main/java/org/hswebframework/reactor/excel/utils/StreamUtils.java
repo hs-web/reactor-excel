@@ -37,9 +37,11 @@ import java.util.function.Function;
  * <p>The writer starts on first demand and its subscription is isolated on a caller-provided
  * blocking scheduler, or {@link Schedulers#boundedElastic()} by default. A full chunk waits for
  * downstream demand instead of entering an unbounded Reactor queue. Asynchronous writer publishers
- * must keep every {@link OutputStream} access on a blocking-capable thread; misuse from a Reactor
- * non-blocking thread fails fast. Cancellation never waits for the writer or downstream callback
- * and releases chunks that have not been transferred to the downstream.</p>
+ * should keep every {@link OutputStream} access on a blocking-capable thread. For compatibility,
+ * access from a Reactor non-blocking thread is warned once per subscription and may continue while
+ * demand is immediately available; the adapter still fails before it would wait for demand.
+ * Cancellation never waits for the writer or downstream callback and releases chunks that have
+ * not been transferred to the downstream.</p>
  */
 @Slf4j
 public class StreamUtils {
@@ -196,10 +198,16 @@ public class StreamUtils {
 
     private abstract static class ManagedOutputStream extends OutputStream {
 
-        final void ensureBlockingThread() {
-            if (Schedulers.isInNonBlockingThread()) {
-                throw new IllegalStateException(
-                    "Blocking OutputStream cannot be used from a Reactor non-blocking thread"
+        private final AtomicBoolean nonBlockingWarningLogged = new AtomicBoolean();
+
+        final void warnIfNonBlockingThread() {
+            if (Schedulers.isInNonBlockingThread()
+                && nonBlockingWarningLogged.compareAndSet(false, true)) {
+                log.warn(
+                    "Blocking OutputStream accessed from Reactor non-blocking thread [{}]. "
+                        + "This compatibility path is allowed only while downstream demand is "
+                        + "immediately available; configure a blocking Scheduler.",
+                    Thread.currentThread().getName()
                 );
             }
         }
@@ -360,12 +368,6 @@ public class StreamUtils {
                 throw new IOException("Concurrent OutputStream writes are not supported");
             }
             try {
-                if (Schedulers.isInNonBlockingThread()) {
-                    releaser.accept(value);
-                    throw new IllegalStateException(
-                        "Blocking OutputStream cannot emit from a Reactor non-blocking thread"
-                    );
-                }
                 awaitDemand(value);
                 if (state != ACTIVE || sink.isCancelled()) {
                     releaser.accept(value);
@@ -390,6 +392,16 @@ public class StreamUtils {
                 if (current == Long.MAX_VALUE
                     || (current > 0 && REQUESTED.compareAndSet(this, current, current - 1))) {
                     return;
+                }
+
+                // Compatibility permits non-blocking access only while demand can be reserved
+                // immediately. Never park an event-loop thread to preserve legacy behavior.
+                if (Schedulers.isInNonBlockingThread()) {
+                    releaser.accept(value);
+                    throw new IllegalStateException(
+                        "Blocking OutputStream cannot wait for downstream demand on a Reactor "
+                            + "non-blocking thread"
+                    );
                 }
 
                 waiter = Thread.currentThread();
@@ -592,7 +604,7 @@ public class StreamUtils {
 
         @Override
         public void write(int value) throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             byte[] full;
             lock.lock();
             try {
@@ -607,7 +619,7 @@ public class StreamUtils {
 
         @Override
         public void write(byte[] source, int offset, int length) throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             checkBounds(source, offset, length);
             while (length > 0) {
                 byte[] full;
@@ -629,13 +641,13 @@ public class StreamUtils {
 
         @Override
         public void flush() throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             emit(detachPartial());
         }
 
         @Override
         public void close() {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             lock.lock();
             try {
                 closed = true;
@@ -646,7 +658,7 @@ public class StreamUtils {
 
         @Override
         void finish() throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             byte[] partial;
             lock.lock();
             try {
@@ -764,7 +776,7 @@ public class StreamUtils {
 
         @Override
         public void write(int value) throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             ByteBuf full;
             lock.lock();
             try {
@@ -779,7 +791,7 @@ public class StreamUtils {
 
         @Override
         public void write(byte[] source, int offset, int length) throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             checkBounds(source, offset, length);
             while (length > 0) {
                 ByteBuf full;
@@ -801,13 +813,13 @@ public class StreamUtils {
 
         @Override
         public void flush() throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             emit(detachPartial());
         }
 
         @Override
         public void close() {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             lock.lock();
             try {
                 closed = true;
@@ -818,7 +830,7 @@ public class StreamUtils {
 
         @Override
         void finish() throws IOException {
-            ensureBlockingThread();
+            warnIfNonBlockingThread();
             ByteBuf partial;
             lock.lock();
             try {

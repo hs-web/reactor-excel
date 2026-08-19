@@ -1,5 +1,9 @@
 package org.hswebframework.reactor.excel.utils;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.netty.buffer.AbstractByteBufAllocator;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -10,6 +14,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
@@ -249,22 +254,75 @@ class StreamUtilsTest {
         );
 
         StepVerifier.create(buffers, 1)
+                    .assertNext(actual -> assertArrayEquals(new byte[]{1, 2, 3, 4}, actual))
                     .expectErrorMatches(error -> error instanceof IllegalStateException
-                        && error.getMessage().contains("non-blocking thread"))
+                        && error.getMessage().contains("cannot wait for downstream demand"))
                     .verify(java.time.Duration.ofSeconds(5));
     }
 
     @Test
-    void asyncWriterCompletionShouldFailOnNonBlockingThread() {
-        Flux<byte[]> buffers = StreamUtils.buffer(
-            4,
-            output -> Mono.delay(java.time.Duration.ofMillis(10)).then()
-        );
+    void asyncWriterShouldWarnOnceAndCompleteWhenDemandIsAvailable() {
+        Logger logger = (Logger) LoggerFactory.getLogger(StreamUtils.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            Flux<byte[]> buffers = StreamUtils.buffer(
+                4,
+                output -> Mono
+                    .delay(java.time.Duration.ofMillis(10))
+                    .then(Mono.fromRunnable(() -> {
+                        try {
+                            output.write(new byte[]{1, 2, 3});
+                        } catch (IOException error) {
+                            throw new UncheckedIOException(error);
+                        }
+                    }))
+            );
 
-        StepVerifier.create(buffers, 1)
-                    .expectErrorMatches(error -> error instanceof IllegalStateException
-                        && error.getMessage().contains("non-blocking thread"))
-                    .verify(java.time.Duration.ofSeconds(5));
+            StepVerifier.create(buffers, 1)
+                        .assertNext(actual -> assertArrayEquals(new byte[]{1, 2, 3}, actual))
+                        .expectComplete()
+                        .verify(java.time.Duration.ofSeconds(5));
+
+            long warnings = appender.list
+                .stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .filter(event -> event
+                    .getFormattedMessage()
+                    .contains("Blocking OutputStream accessed from Reactor non-blocking thread"))
+                .count();
+            assertEquals(1, warnings, "non-blocking access should warn once per subscription");
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
+    void byteBufAsyncWriterShouldFailBeforeWaitingAndReleaseBuffers() {
+        TrackingAllocator allocator = new TrackingAllocator();
+
+        StepVerifier
+            .create(StreamUtils.buffer(
+                4,
+                allocator,
+                output -> Mono
+                    .delay(java.time.Duration.ofMillis(10))
+                    .then(Mono.fromRunnable(() -> {
+                        try {
+                            output.write(new byte[]{1, 2, 3, 4, 5, 6, 7, 8});
+                        } catch (IOException error) {
+                            throw new UncheckedIOException(error);
+                        }
+                    }))
+            ), 1)
+            .assertNext(ReferenceCountUtil::safeRelease)
+            .expectErrorMatches(error -> error instanceof IllegalStateException
+                && error.getMessage().contains("cannot wait for downstream demand"))
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertTrue(allocator.allReleased(), "failed non-blocking emission leaked a ByteBuf");
     }
 
     @Test
