@@ -38,10 +38,10 @@ import java.util.function.Function;
  * blocking scheduler, or {@link Schedulers#boundedElastic()} by default. A full chunk waits for
  * downstream demand instead of entering an unbounded Reactor queue. Asynchronous writer publishers
  * should keep every {@link OutputStream} access on a blocking-capable thread. For compatibility,
- * access from a Reactor non-blocking thread is warned once per subscription and may continue while
- * demand is immediately available; the adapter still fails before it would wait for demand.
- * Cancellation never waits for the writer or downstream callback and releases chunks that have
- * not been transferred to the downstream.</p>
+ * access from a Reactor non-blocking thread is warned once per subscription with its first external
+ * call site and may continue while demand is immediately available; the adapter still fails before
+ * it would wait for demand. Cancellation never waits for the writer or downstream callback and
+ * releases chunks that have not been transferred to the downstream.</p>
  */
 @Slf4j
 public class StreamUtils {
@@ -205,11 +205,34 @@ public class StreamUtils {
                 && nonBlockingWarningLogged.compareAndSet(false, true)) {
                 log.warn(
                     "Blocking OutputStream accessed from Reactor non-blocking thread [{}]. "
+                        + "callSite=[{}]. "
                         + "This compatibility path is allowed only while downstream demand is "
                         + "immediately available; configure a blocking Scheduler.",
-                    Thread.currentThread().getName()
+                    Thread.currentThread().getName(),
+                    findExternalCallSite()
                 );
             }
+        }
+
+        private static String findExternalCallSite() {
+            String streamUtilsClassName = StreamUtils.class.getName();
+            StackTraceElement fallback = null;
+            for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
+                String className = frame.getClassName();
+                if (className.equals(Thread.class.getName())
+                    || className.equals(streamUtilsClassName)
+                    || className.startsWith(streamUtilsClassName + "$")) {
+                    continue;
+                }
+                if (fallback == null) {
+                    fallback = frame;
+                }
+                // OutputStream.write(byte[]) is only a forwarding frame; report its caller.
+                if (!className.startsWith("java.io.")) {
+                    return frame.toString();
+                }
+            }
+            return fallback == null ? "unknown" : fallback.toString();
         }
 
         // close() only seals writes. The producer publisher owns the terminal signal so an

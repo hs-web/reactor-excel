@@ -285,14 +285,17 @@ class StreamUtilsTest {
                         .expectComplete()
                         .verify(java.time.Duration.ofSeconds(5));
 
-            long warnings = appender.list
+            List<String> warnings = appender.list
                 .stream()
                 .filter(event -> event.getLevel() == Level.WARN)
-                .filter(event -> event
-                    .getFormattedMessage()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message
                     .contains("Blocking OutputStream accessed from Reactor non-blocking thread"))
-                .count();
-            assertEquals(1, warnings, "non-blocking access should warn once per subscription");
+                .collect(java.util.stream.Collectors.toList());
+            assertEquals(1, warnings.size(),
+                "non-blocking access should warn once per subscription");
+            assertTrue(warnings.get(0).contains("StreamUtilsTest.java:"),
+                "warning should identify the external call site: " + warnings.get(0));
         } finally {
             logger.detachAppender(appender);
             appender.stop();
