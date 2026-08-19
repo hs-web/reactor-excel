@@ -23,6 +23,7 @@ import reactor.test.StepVerifier;
 import reactor.test.publisher.TestPublisher;
 
 import java.time.Duration;
+import java.io.ByteArrayOutputStream;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -81,6 +82,44 @@ class CsvByteBufFluxTest {
             .verify(Duration.ofSeconds(5));
 
         assertTrue(allocator.allReleased(), "oversized cell leaked a ByteBuf");
+    }
+
+    @Test
+    void smallCellsShouldShareBufferSizedOutputChunks() {
+        TrackingAllocator allocator = new TrackingAllocator();
+        AtomicInteger chunkCount = new AtomicInteger();
+        byte[] bytes = new CsvWriter()
+            .write(
+                Flux.range(0, 100).map(ignore -> cell("x")),
+                allocator,
+                64,
+                new CharsetOption(java.nio.charset.StandardCharsets.UTF_8)
+            )
+            .map(buffer -> {
+                chunkCount.incrementAndGet();
+                byte[] chunk = copyReadableBytes(buffer);
+                ReferenceCountUtil.safeRelease(buffer);
+                return chunk;
+            })
+            .reduce(new ByteArrayOutputStream(), (output, chunk) -> {
+                output.write(chunk, 0, chunk.length);
+                return output;
+            })
+            .map(ByteArrayOutputStream::toByteArray)
+            .block(Duration.ofSeconds(5));
+
+        StringBuilder expected = new StringBuilder("\ufeff");
+        for (int i = 0; i < 100; i++) {
+            expected.append("x\r\n");
+        }
+        assertNotNull(bytes);
+        assertArrayEquals(
+            expected.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            bytes
+        );
+        assertEquals(6, chunkCount.get(), "small cells were not aggregated by buffer size");
+        assertTrue(allocator.allocationCount() <= 8, "small cells allocated one buffer per cell");
+        assertTrue(allocator.allReleased(), "aggregated chunks leaked a ByteBuf");
     }
 
     @Test

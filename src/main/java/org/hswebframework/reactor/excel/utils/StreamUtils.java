@@ -12,6 +12,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Operators;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.util.context.Context;
 
@@ -22,6 +23,7 @@ import java.io.OutputStream;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.locks.LockSupport;
@@ -32,12 +34,12 @@ import java.util.function.Function;
 /**
  * Blocking {@link OutputStream} to reactive chunks adapter.
  *
- * <p>The writer starts on first demand and its subscription is isolated on
- * {@link Schedulers#boundedElastic()}. A full chunk waits for downstream demand instead of entering
- * an unbounded Reactor queue. Asynchronous writer publishers must keep every {@link OutputStream}
- * access on a blocking-capable thread; misuse from a Reactor non-blocking thread fails fast.
- * Cancellation never waits for the writer or downstream callback and releases chunks that have not
- * been transferred to the downstream.</p>
+ * <p>The writer starts on first demand and its subscription is isolated on a caller-provided
+ * blocking scheduler, or {@link Schedulers#boundedElastic()} by default. A full chunk waits for
+ * downstream demand instead of entering an unbounded Reactor queue. Asynchronous writer publishers
+ * must keep every {@link OutputStream} access on a blocking-capable thread; misuse from a Reactor
+ * non-blocking thread fails fast. Cancellation never waits for the writer or downstream callback
+ * and releases chunks that have not been transferred to the downstream.</p>
  */
 @Slf4j
 public class StreamUtils {
@@ -55,12 +57,31 @@ public class StreamUtils {
      */
     public static Flux<byte[]> buffer(int bufferSize,
                                       Function<OutputStream, Mono<Void>> streamConsumer) {
+        return buffer(bufferSize, Schedulers.boundedElastic(), streamConsumer);
+    }
+
+    /**
+     * Adapt a blocking output writer using a caller-owned blocking scheduler.
+     *
+     * <p>The scheduler must not execute on Reactor non-blocking threads and must remain alive until
+     * the returned publisher terminates. This adapter does not dispose it.</p>
+     *
+     * @param bufferSize maximum size of each emitted array
+     * @param scheduler scheduler used to subscribe the blocking writer
+     * @param streamConsumer blocking writer callback
+     * @return cold demand-aware byte stream
+     * @since 1.0.7
+     */
+    public static Flux<byte[]> buffer(int bufferSize,
+                                      Scheduler scheduler,
+                                      Function<OutputStream, Mono<Void>> streamConsumer) {
         checkBufferSize(bufferSize);
         return StreamUtils.<byte[]>create(
             streamConsumer,
             ignore -> {
             },
-            emitter -> new ByteArrayOutputStream(bufferSize, emitter)
+            emitter -> new ByteArrayOutputStream(bufferSize, emitter),
+            scheduler
         );
     }
 
@@ -82,19 +103,42 @@ public class StreamUtils {
     public static Flux<ByteBuf> buffer(int bufferSize,
                                        ByteBufAllocator allocator,
                                        Function<OutputStream, Mono<Void>> streamConsumer) {
+        return buffer(bufferSize, allocator, Schedulers.boundedElastic(), streamConsumer);
+    }
+
+    /**
+     * Adapt a blocking output writer to reference-counted buffers using a caller-owned scheduler.
+     *
+     * <p>The scheduler must not execute on Reactor non-blocking threads and must remain alive until
+     * the returned publisher terminates. This adapter does not dispose it.</p>
+     *
+     * @param bufferSize maximum size of each emitted buffer
+     * @param allocator allocator used independently for every subscription
+     * @param scheduler scheduler used to subscribe the blocking writer
+     * @param streamConsumer blocking writer callback
+     * @return demand-aware buffer stream
+     * @since 1.0.7
+     */
+    public static Flux<ByteBuf> buffer(int bufferSize,
+                                       ByteBufAllocator allocator,
+                                       Scheduler scheduler,
+                                       Function<OutputStream, Mono<Void>> streamConsumer) {
         checkBufferSize(bufferSize);
         Objects.requireNonNull(allocator, "allocator");
         return StreamUtils.<ByteBuf>create(
             streamConsumer,
             ReferenceCountUtil::safeRelease,
-            emitter -> new ByteBufOutputStream(bufferSize, allocator, emitter)
+            emitter -> new ByteBufOutputStream(bufferSize, allocator, emitter),
+            scheduler
         ).doOnDiscard(ByteBuf.class, ReferenceCountUtil::safeRelease);
     }
 
     private static <T> Flux<T> create(Function<OutputStream, Mono<Void>> streamConsumer,
                                       Consumer<T> releaser,
-                                      Function<DemandEmitter<T>, ManagedOutputStream> streamFactory) {
+                                      Function<DemandEmitter<T>, ManagedOutputStream> streamFactory,
+                                      Scheduler scheduler) {
         Objects.requireNonNull(streamConsumer, "streamConsumer");
+        Objects.requireNonNull(scheduler, "scheduler");
         Flux<T> output = Flux.create(sink -> {
             DemandEmitter<T> emitter = new DemandEmitter<>(sink, releaser);
             ManagedOutputStream stream = streamFactory.apply(emitter);
@@ -104,7 +148,8 @@ public class StreamUtils {
                 sink,
                 emitter,
                 stream,
-                resources
+                resources,
+                scheduler
             );
 
             resources.add(stream::cancel);
@@ -181,18 +226,22 @@ public class StreamUtils {
 
         private final Disposable.Composite resources;
 
+        private final Scheduler scheduler;
+
         private final AtomicBoolean started = new AtomicBoolean();
 
         private WriterTask(Function<OutputStream, Mono<Void>> streamConsumer,
                            FluxSink<T> sink,
                            DemandEmitter<T> emitter,
                            ManagedOutputStream stream,
-                           Disposable.Composite resources) {
+                           Disposable.Composite resources,
+                           Scheduler scheduler) {
             this.streamConsumer = streamConsumer;
             this.sink = sink;
             this.emitter = emitter;
             this.stream = stream;
             this.resources = resources;
+            this.scheduler = scheduler;
         }
 
         private void request(long count) {
@@ -206,20 +255,24 @@ public class StreamUtils {
             if (emitter.isCancelled() || sink.isCancelled()) {
                 return;
             }
-            // Synchronous callback setup belongs to boundedElastic. An asynchronous callback can
-            // change threads later and must keep OutputStream access on a blocking-capable thread.
+            // Synchronous callback setup belongs to the configured blocking scheduler. An async
+            // callback can change threads later and must keep OutputStream access off event loops.
             Disposable subscription = Mono
-                .defer(() -> Objects.requireNonNull(
-                    streamConsumer.apply(stream),
-                    "streamConsumer returned null"
-                ))
+                .defer(() -> {
+                    ensureBlockingSchedulerThread();
+                    return Objects.requireNonNull(
+                        streamConsumer.apply(stream),
+                        "streamConsumer returned null"
+                    );
+                })
                 .onErrorResume(error -> {
-                    if (emitter.isCancelled() || sink.isCancelled()) {
+                    if ((emitter.isCancelled() || sink.isCancelled())
+                        && isCancellationFailure(error)) {
                         return Mono.empty();
                     }
                     return Mono.error(error);
                 })
-                .subscribeOn(Schedulers.boundedElastic())
+                .subscribeOn(scheduler)
                 .subscribe(
                     ignore -> {
                     },
@@ -235,6 +288,8 @@ public class StreamUtils {
             stream.cancel();
             if (!cancelled && !sink.isCancelled()) {
                 sink.error(error);
+            } else if (!isCancellationFailure(error)) {
+                Operators.onErrorDropped(error, Context.of(sink.contextView()));
             }
         }
 
@@ -246,6 +301,8 @@ public class StreamUtils {
                 stream.cancel();
                 if (!cancelled && !sink.isCancelled()) {
                     sink.error(error);
+                } else if (!isCancellationFailure(error)) {
+                    Operators.onErrorDropped(error, Context.of(sink.contextView()));
                 }
             }
         }
@@ -312,7 +369,9 @@ public class StreamUtils {
                 awaitDemand(value);
                 if (state != ACTIVE || sink.isCancelled()) {
                     releaser.accept(value);
-                    throw new IOException("Output stream was cancelled");
+                    throw new WriterCancelledException(
+                        "Output stream was cancelled while emitting a chunk"
+                    );
                 }
                 // Demand is reserved before this callback. No adapter lock is held while invoking
                 // downstream, so request and cancel remain non-blocking even for a slow subscriber.
@@ -340,6 +399,11 @@ public class StreamUtils {
                 waiter = null;
                 if (Thread.interrupted()) {
                     releaser.accept(value);
+                    if (state != ACTIVE || sink.isCancelled()) {
+                        throw new WriterCancelledException(
+                            "Output stream was interrupted during cancellation"
+                        );
+                    }
                     InterruptedIOException interrupted = new InterruptedIOException(
                         "Interrupted while waiting for downstream demand"
                     );
@@ -660,6 +724,9 @@ public class StreamUtils {
 
         private void ensureOpen() throws IOException {
             if (closed) {
+                if (emitter.isCancelled()) {
+                    throw new WriterCancelledException("Output stream was cancelled");
+                }
                 throw new IOException("Output stream is closed");
             }
         }
@@ -826,6 +893,9 @@ public class StreamUtils {
 
         private void ensureOpen() throws IOException {
             if (closed) {
+                if (emitter.isCancelled()) {
+                    throw new WriterCancelledException("Output stream was cancelled");
+                }
                 throw new IOException("Output stream is closed");
             }
         }
@@ -846,6 +916,35 @@ public class StreamUtils {
         Objects.requireNonNull(source, "source");
         if ((offset | length) < 0 || length > source.length - offset) {
             throw new IndexOutOfBoundsException();
+        }
+    }
+
+    private static void ensureBlockingSchedulerThread() {
+        if (Schedulers.isInNonBlockingThread()) {
+            throw new IllegalStateException(
+                "Blocking writer scheduler executed on a Reactor non-blocking thread"
+            );
+        }
+    }
+
+    private static boolean isCancellationFailure(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof WriterCancelledException
+                || current instanceof CancellationException
+                || current instanceof InterruptedException
+                || current instanceof InterruptedIOException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static final class WriterCancelledException extends IOException {
+
+        private WriterCancelledException(String message) {
+            super(message);
         }
     }
 }

@@ -3,6 +3,7 @@ package org.hswebframework.reactor.excel.spi;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import org.hswebframework.reactor.excel.ExcelOption;
+import org.hswebframework.reactor.excel.BlockingSchedulerOption;
 import org.hswebframework.reactor.excel.WritableCell;
 import org.hswebframework.reactor.excel.utils.StreamUtils;
 import reactor.core.publisher.Flux;
@@ -60,7 +61,9 @@ public interface ExcelWriter {
      * <p>A blocking serializer may need to consume its cell source before it can produce the first
      * byte chunk, so this adapter bounds encoded bytes but cannot add cell-level backpressure to
      * such a format. Implementations whose source callbacks can hop threads must also keep all
-     * {@link OutputStream} access off Reactor non-blocking threads.</p>
+     * {@link OutputStream} access off Reactor non-blocking threads. A caller may use
+     * {@link BlockingSchedulerOption} to isolate long-lived blocking exports from Reactor's shared
+     * bounded-elastic scheduler.</p>
      *
      * @param dataStream ordered cells to serialize
      * @param allocator allocator for output buffers
@@ -76,6 +79,7 @@ public interface ExcelWriter {
         return StreamUtils.buffer(
             bufferSize,
             allocator,
+            BlockingSchedulerOption.resolve(options),
             output -> write(dataStream, output, options)
         );
     }

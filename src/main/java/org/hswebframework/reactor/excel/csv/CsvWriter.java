@@ -65,7 +65,7 @@ public class CsvWriter implements ExcelWriter {
         Charset charset = getCharset(options);
         return Mono.defer(() -> {
             try {
-                outputStream.write("\ufeff".getBytes(charset));
+                outputStream.write(CsvBom.bytes(charset));
             } catch (IOException e) {
                 return Mono.error(e);
             }

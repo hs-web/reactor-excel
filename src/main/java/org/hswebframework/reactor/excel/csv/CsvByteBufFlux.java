@@ -28,9 +28,10 @@ import java.util.function.BooleanSupplier;
 /**
  * Incremental CSV encoder that couples cell requests to {@link ByteBuf} demand.
  *
- * <p>Each subscription owns one continuous charset encoder and a lock-free drain loop. Encoding
- * writes directly into a bounded per-cell buffer, then demand slices it into fixed-size output
- * buffers without copying. Reactive demand bounds the number of source cells, while
+ * <p>Each subscription owns one continuous charset encoder and a lock-free drain loop. A reusable
+ * staging buffer keeps one cell private until its size has been validated. Small cells are copied
+ * into fixed-size aggregate chunks; cells larger than one output chunk transfer their staging
+ * buffer and are sliced lazily without copying. Reactive demand bounds source requests, while
  * {@code maxEncodedCellBytes} bounds the encoded representation of the current cell.</p>
  */
 final class CsvByteBufFlux extends Flux<ByteBuf> {
@@ -155,9 +156,9 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
             );
             try {
                 // The BOM remains a separate chunk so no source cell is requested for its demand.
-                byte[] bom = "\ufeff".getBytes(charset);
+                byte[] bom = CsvBom.bytes(charset);
                 output.write(bom, 0, bom.length);
-                output.sealCurrent();
+                output.sealAggregate();
                 output.beginCell();
                 CSVPrinter printer = new CSVPrinter(new OutputStreamWriter(output, charset), format);
                 printer.flush();
@@ -422,9 +423,10 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
     }
 
     /**
-     * OutputStream facade used by the continuous OutputStreamWriter. One bounded buffer represents
-     * the current cell and is sliced lazily as demand arrives. Only the drain owner mutates its
-     * queue; cancellation is observed through the supplied atomic flag.
+     * OutputStream facade used by the continuous OutputStreamWriter. One staging buffer validates a
+     * complete cell before it becomes visible, while one fixed-size aggregate buffer combines small
+     * cells. Large staging buffers are queued and retained-sliced lazily as demand arrives. Only the
+     * drain owner mutates these buffers; cancellation is observed through the supplied atomic flag.
      */
     private static final class ChunkedByteBufOutputStream extends OutputStream {
 
@@ -438,7 +440,9 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
 
         private final Queue<ByteBuf> ready = new ArrayDeque<>();
 
-        private ByteBuf current;
+        private ByteBuf staging;
+
+        private ByteBuf aggregate;
 
         private int encodedCellBytes;
 
@@ -460,10 +464,10 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
         public void write(int value) throws IOException {
             ensureWritable();
             reserveCellBytes(1);
-            ensureBuffer();
-            current.writeByte(value);
-            if (!cellActive && !current.isWritable()) {
-                sealCurrent();
+            if (cellActive) {
+                ensureStaging().writeByte(value);
+            } else {
+                writeAggregateByte(value);
             }
         }
 
@@ -481,21 +485,10 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
             ensureWritable();
             reserveCellBytes(length);
             if (cellActive) {
-                ensureBuffer();
-                current.writeBytes(source, offset, length);
+                ensureStaging().writeBytes(source, offset, length);
                 return;
             }
-            while (length > 0) {
-                ensureWritable();
-                ensureBuffer();
-                int copyLength = Math.min(length, current.writableBytes());
-                current.writeBytes(source, offset, copyLength);
-                offset += copyLength;
-                length -= copyLength;
-                if (!current.isWritable()) {
-                    sealCurrent();
-                }
-            }
+            writeAggregate(source, offset, length);
         }
 
         @Override
@@ -504,7 +497,9 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
                 return;
             }
             ensureWritable();
-            sealCurrent();
+            sealAggregate();
+            ReferenceCountUtil.safeRelease(staging);
+            staging = null;
             closed = true;
         }
 
@@ -517,9 +512,41 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
         }
 
         private void endCell() {
-            sealCurrent();
+            if (staging != null && staging.isReadable()) {
+                if (staging.readableBytes() <= bufferSize) {
+                    aggregateSmallCell();
+                } else {
+                    sealAggregate();
+                    ByteBuf largeCell = staging;
+                    staging = null;
+                    enqueue(largeCell);
+                }
+            }
             cellActive = false;
             encodedCellBytes = 0;
+        }
+
+        private void aggregateSmallCell() {
+            int cellBytes = staging.readableBytes();
+            ByteBuf target = ensureAggregate();
+            int aggregateBytes = target.writableBytes();
+            if (cellBytes <= aggregateBytes) {
+                target.writeBytes(staging, staging.readerIndex(), cellBytes);
+                staging.clear();
+                if (!target.isWritable()) {
+                    sealAggregate();
+                }
+                return;
+            }
+
+            // A cell crossing the chunk boundary must not allocate a third root buffer. Fill and
+            // queue the old aggregate, then transfer the unconsumed staging tail as the next one.
+            target.writeBytes(staging, staging.readerIndex(), aggregateBytes);
+            staging.skipBytes(aggregateBytes);
+            sealAggregate();
+            staging.discardReadBytes();
+            aggregate = staging;
+            staging = null;
         }
 
         private void reserveCellBytes(int length) {
@@ -544,27 +571,56 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
             }
         }
 
-        private void ensureBuffer() {
-            if (current == null) {
-                if (cellActive) {
-                    int initialCapacity = Math.min(bufferSize, maxEncodedCellBytes);
-                    current = allocator.buffer(initialCapacity, maxEncodedCellBytes);
-                } else {
-                    current = allocator.buffer(bufferSize, bufferSize);
+        private ByteBuf ensureStaging() {
+            if (staging == null) {
+                int initialCapacity = Math.min(bufferSize, maxEncodedCellBytes);
+                staging = allocator.buffer(initialCapacity, maxEncodedCellBytes);
+            }
+            return staging;
+        }
+
+        private ByteBuf ensureAggregate() {
+            if (aggregate == null) {
+                aggregate = allocator.buffer(bufferSize, bufferSize);
+            }
+            return aggregate;
+        }
+
+        private void writeAggregateByte(int value) {
+            ByteBuf target = ensureAggregate();
+            target.writeByte(value);
+            if (!target.isWritable()) {
+                sealAggregate();
+            }
+        }
+
+        private void writeAggregate(byte[] source, int offset, int length) {
+            while (length > 0) {
+                ByteBuf target = ensureAggregate();
+                int copyLength = Math.min(length, target.writableBytes());
+                target.writeBytes(source, offset, copyLength);
+                offset += copyLength;
+                length -= copyLength;
+                if (!target.isWritable()) {
+                    sealAggregate();
                 }
             }
         }
 
-        private void sealCurrent() {
-            if (current == null) {
+        private void sealAggregate() {
+            if (aggregate == null) {
                 return;
             }
-            ByteBuf buffer = current;
-            current = null;
+            ByteBuf buffer = aggregate;
+            aggregate = null;
             if (!buffer.isReadable()) {
                 ReferenceCountUtil.safeRelease(buffer);
                 return;
             }
+            enqueue(buffer);
+        }
+
+        private void enqueue(ByteBuf buffer) {
             try {
                 ready.add(buffer);
             } catch (Throwable queueError) {
@@ -602,8 +658,10 @@ final class CsvByteBufFlux extends Flux<ByteBuf> {
             closed = true;
             cellActive = false;
             encodedCellBytes = 0;
-            ReferenceCountUtil.safeRelease(current);
-            current = null;
+            ReferenceCountUtil.safeRelease(staging);
+            staging = null;
+            ReferenceCountUtil.safeRelease(aggregate);
+            aggregate = null;
             ByteBuf buffer;
             while ((buffer = ready.poll()) != null) {
                 ReferenceCountUtil.safeRelease(buffer);

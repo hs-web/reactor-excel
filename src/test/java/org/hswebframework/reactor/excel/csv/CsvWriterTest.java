@@ -15,6 +15,7 @@ import reactor.test.StepVerifier;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -81,7 +82,7 @@ class CsvWriterTest {
     }
 
     @Test
-    void byteBufWriteShouldRequestCellsOnlyAfterOutputDemand() {
+    void byteBufWriteShouldAggregateCellsWithoutRequestingAheadOfOutputDemand() {
         AtomicLong sourceRequests = new AtomicLong();
         Flux<WritableCell> source = Flux
             .just(
@@ -108,16 +109,8 @@ class CsvWriterTest {
                     .then(() -> assertEquals(0, sourceRequests.get()))
                     .thenRequest(1)
                     .assertNext(buffer -> {
-                        assertEquals(1, sourceRequests.get());
-                        assertEquals("first", new String(
-                            StreamUtils.releaseToByteArray(buffer),
-                            StandardCharsets.UTF_8
-                        ));
-                    })
-                    .thenRequest(1)
-                    .assertNext(buffer -> {
                         assertEquals(2, sourceRequests.get());
-                        assertEquals(",second\r\n", new String(
+                        assertEquals("first,second\r\n", new String(
                             StreamUtils.releaseToByteArray(buffer),
                             StandardCharsets.UTF_8
                         ));
@@ -152,23 +145,45 @@ class CsvWriterTest {
     }
 
     @Test
-    void byteBufWriteShouldMatchOutputStreamForStatefulCharset() {
+    void bothWritePathsShouldEmitExactlyOneUtf16Bom() {
         CsvWriter writer = new CsvWriter();
         Flux<WritableCell> source = Flux.just(
             cell(0, "first", false),
             cell(1, "second", true)
         );
         CharsetOption charset = new CharsetOption(StandardCharsets.UTF_16);
-        ByteArrayOutputStream expected = new ByteArrayOutputStream();
+        byte[] expected = "first,second\r\n".getBytes(StandardCharsets.UTF_16);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
 
-        writer.write(source, expected, charset).block();
-        byte[] actual = writer
+        writer.write(source, output, charset).block();
+        byte[] byteBufOutput = writer
             .write(source, UnpooledByteBufAllocator.DEFAULT, 3, charset)
             .map(StreamUtils::releaseToByteArray)
             .reduce(new byte[0], CsvWriterTest::concat)
             .block();
 
-        assertArrayEquals(expected.toByteArray(), actual);
+        assertArrayEquals(expected, output.toByteArray());
+        assertArrayEquals(expected, byteBufOutput);
+    }
+
+    @Test
+    void nonUnicodeCharsetShouldNotReceiveReplacementBomBytes() {
+        CsvWriter writer = new CsvWriter();
+        Charset gbk = Charset.forName("GBK");
+        CharsetOption charset = new CharsetOption(gbk);
+        Flux<WritableCell> source = Flux.just(cell(0, "中文", true));
+        byte[] expected = "中文\r\n".getBytes(gbk);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        writer.write(source, output, charset).block();
+        byte[] byteBufOutput = writer
+            .write(source, UnpooledByteBufAllocator.DEFAULT, 3, charset)
+            .map(StreamUtils::releaseToByteArray)
+            .reduce(new byte[0], CsvWriterTest::concat)
+            .block();
+
+        assertArrayEquals(expected, output.toByteArray());
+        assertArrayEquals(expected, byteBufOutput);
     }
 
     @Test

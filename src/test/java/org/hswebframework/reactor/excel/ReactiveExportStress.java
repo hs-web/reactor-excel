@@ -24,6 +24,7 @@ import java.io.UncheckedIOException;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -241,6 +242,7 @@ class ReactiveExportStress {
             Duration.ofMillis(1),
             Long.MAX_VALUE
         );
+        long startedAt = System.nanoTime();
 
         try {
             csvWriter()
@@ -250,6 +252,7 @@ class ReactiveExportStress {
         } finally {
             subscriber.cancel();
         }
+        long elapsedNanos = System.nanoTime() - startedAt;
 
         assertTrue(subscriber.isComplete(), "CSV output should complete normally");
         assertNull(subscriber.error(), "CSV output should not fail");
@@ -260,11 +263,14 @@ class ReactiveExportStress {
         long unfulfilledRequests = requestedRows.get() - producedRows.get();
         assertTrue(unfulfilledRequests >= 0 && unfulfilledRequests <= 1,
                    "CSV retained more than one unfulfilled source request");
-        assertEquals((long) rows + 2, subscriber.receivedCount(),
-                     "expected BOM, header, and one buffer per bounded row");
         assertTrue(outputBytes.get() > rows, "CSV output should contain encoded row data");
-        assertTrue(allocator.maxLiveBytes() <= CSV_BUFFER_SIZE,
-                   "slow consumer retained more than one bounded ByteBuf");
+        long maximumChunks = 1 + (outputBytes.get() + CSV_BUFFER_SIZE - 1) / CSV_BUFFER_SIZE;
+        assertTrue(subscriber.receivedCount() <= maximumChunks,
+                   "small CSV cells were not aggregated into bounded chunks");
+        assertTrue(subscriber.receivedCount() < rows / 2,
+                   "CSV output still emitted close to one buffer per row");
+        assertTrue(allocator.maxLiveBytes() <= 2L * CSV_BUFFER_SIZE,
+                   "slow consumer exceeded the aggregate and staging buffer bound");
         assertEquals(0, allocator.liveBytes(), "all delivered ByteBuf instances must be released");
         heap.finish();
         assertHeapBounded(heap, maxHeapGrowth, "CSV slow-consumer export");
@@ -272,6 +278,8 @@ class ReactiveExportStress {
             "CSV",
             "rows=" + rows + ", retainedHeapGrowth=" + toMiB(heap.growth())
                 + " MiB, maxOutstandingRows=" + maxOutstandingRows.get()
+                + ", outputChunks=" + subscriber.receivedCount()
+                + ", rowsPerSecond=" + rowsPerSecond(rows, elapsedNanos)
                 + ", maxLiveByteBuf=" + allocator.maxLiveBytes() + " bytes"
         );
     }
@@ -697,6 +705,10 @@ class ReactiveExportStress {
         return bytes / MEBIBYTE;
     }
 
+    private static long rowsPerSecond(long rows, long elapsedNanos) {
+        return Math.round(rows * 1_000_000_000D / Math.max(1L, elapsedNanos));
+    }
+
     private static void report(String scenario, String measurements) {
         System.out.println("[reactor-excel-stress] " + scenario + ": " + measurements);
     }
@@ -768,9 +780,9 @@ class ReactiveExportStress {
 
         private final ByteBufAllocator delegate = UnpooledByteBufAllocator.DEFAULT;
 
-        private final AtomicLong liveBytes = new AtomicLong();
-
         private final AtomicLong maxLiveBytes = new AtomicLong();
+
+        private final List<ByteBuf> allocated = Collections.synchronizedList(new ArrayList<>());
 
         private CountingAllocator() {
             super(false);
@@ -792,25 +804,38 @@ class ReactiveExportStress {
         }
 
         private ByteBuf allocated(ByteBuf buffer) {
-            long current = liveBytes.addAndGet(buffer.capacity());
-            updateMax(maxLiveBytes, current);
+            allocated.add(buffer);
+            sampleLiveBytes();
             return buffer;
         }
 
         private void release(ByteBuf buffer) {
-            int capacity = buffer.capacity();
             ReferenceCountUtil.safeRelease(buffer);
-            if (buffer.refCnt() == 0) {
-                liveBytes.addAndGet(-capacity);
-            }
+            sampleLiveBytes();
         }
 
         private long liveBytes() {
-            return liveBytes.get();
+            long live = 0;
+            synchronized (allocated) {
+                for (int i = allocated.size() - 1; i >= 0; i--) {
+                    ByteBuf buffer = allocated.get(i);
+                    if (buffer.refCnt() == 0) {
+                        allocated.remove(i);
+                    } else {
+                        live += buffer.capacity();
+                    }
+                }
+            }
+            return live;
         }
 
         private long maxLiveBytes() {
+            sampleLiveBytes();
             return maxLiveBytes.get();
+        }
+
+        private void sampleLiveBytes() {
+            updateMax(maxLiveBytes, liveBytes());
         }
     }
 

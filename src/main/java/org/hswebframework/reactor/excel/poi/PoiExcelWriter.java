@@ -1,7 +1,6 @@
 package org.hswebframework.reactor.excel.poi;
 
 import lombok.SneakyThrows;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
@@ -19,6 +18,7 @@ import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoSink;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.io.OutputStream;
@@ -34,11 +34,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * Apache POI based XLSX serializer.
  *
  * <p>POI workbook mutation, final serialization, and lifecycle cleanup are blocking operations and
- * are isolated on {@link Schedulers#boundedElastic()}. The writer uses a one-cell scheduler prefetch,
- * but XLSX bytes are available only after the workbook has been built, so byte demand does not
- * provide cell-level backpressure.</p>
+ * are isolated on the scheduler selected by {@link BlockingSchedulerOption}, or
+ * {@link Schedulers#boundedElastic()} by default. The writer uses a one-cell scheduler prefetch, but
+ * XLSX bytes are available only after the workbook has been built, so byte demand does not provide
+ * cell-level backpressure.</p>
  */
-@Slf4j
 public class PoiExcelWriter implements ExcelWriter {
 
     @Override
@@ -50,16 +50,20 @@ public class PoiExcelWriter implements ExcelWriter {
         return new SXSSFWorkbook();
     }
 
+    /**
+     * Serialize and close a workbook after the cell source has completed successfully.
+     *
+     * <p>This hook is not invoked for source errors or cancellation. Implementations that own
+     * additional resources should release them in {@link #closeResources(Workbook, OutputStream)}.
+     * Serialization failures propagate to the reactive chain and then use that cleanup hook.</p>
+     *
+     * @param workbook completed workbook
+     * @param stream target output stream
+     */
     @SneakyThrows
     protected void writeAndClose(Workbook workbook, OutputStream stream) {
-        try {
-            workbook.write(stream);
-            stream.flush();
-        } catch (Throwable e) {
-            closeQuietly(workbook, stream);
-            log.error(e.getMessage(), e);
-            throw e;
-        }
+        workbook.write(stream);
+        stream.flush();
         try {
             workbook.close();
         } finally {
@@ -67,7 +71,18 @@ public class PoiExcelWriter implements ExcelWriter {
         }
     }
 
-    private void closeQuietly(Workbook workbook, OutputStream stream) {
+    /**
+     * Release workbook and stream resources after acquisition failure, source error, cancellation,
+     * or serialization failure.
+     *
+     * <p>The configured blocking scheduler invokes this hook at most once for an acquired resource.
+     * Overrides should release additional resources without re-serializing the workbook.</p>
+     *
+     * @param workbook workbook to close, or {@code null} when creation failed
+     * @param stream output stream to close
+     * @since 1.0.7
+     */
+    protected void closeResources(Workbook workbook, OutputStream stream) {
         StreamUtils.safeClose(workbook);
         StreamUtils.safeClose(stream);
     }
@@ -131,8 +146,9 @@ public class PoiExcelWriter implements ExcelWriter {
     public Mono<Void> write(Flux<WritableCell> dataStream,
                             OutputStream outputStream,
                             ExcelOption... options) {
+        Scheduler scheduler = BlockingSchedulerOption.resolve(options);
         return Mono.usingWhen(
-            acquireWriteResource(outputStream, options),
+            acquireWriteResource(outputStream, scheduler, options),
             resource -> resource.write(dataStream),
             PoiWriteResource::closeAsync,
             (resource, error) -> resource.closeAsync(),
@@ -141,36 +157,39 @@ public class PoiExcelWriter implements ExcelWriter {
     }
 
     private Mono<PoiWriteResource> acquireWriteResource(OutputStream outputStream,
+                                                        Scheduler scheduler,
                                                         ExcelOption... options) {
         return Mono.create(sink -> {
             PoiWriteResourceAcquisition acquisition =
-                new PoiWriteResourceAcquisition(outputStream, options);
+                new PoiWriteResourceAcquisition(outputStream, scheduler, options);
             sink.onCancel(acquisition::cancel);
-            Schedulers
-                .boundedElastic()
-                .schedule(() -> acquisition.acquire(sink));
+            scheduler.schedule(() -> acquisition.acquire(sink));
         });
     }
 
     @SneakyThrows
     private PoiWriteResource createWriteResource(OutputStream outputStream,
+                                                 Scheduler scheduler,
                                                  ExcelOption... options) {
-        Context context = Context.create();
-        Options opts = options.length > 0 ? Options.of(Arrays.asList(options)) : Options.empty();
+        // Validate before ownership transfer so an invalid scheduler never runs POI or cleanup on
+        // an event-loop thread. The caller still owns the untouched stream when validation fails.
+        ensureBlockingThread();
         Workbook workbook = null;
         try {
+            Context context = Context.create();
+            Options opts = options.length > 0 ? Options.of(Arrays.asList(options)) : Options.empty();
             workbook = createWorkBook();
             handleWriteOption(workbook, context, opts);
-            return new PoiWriteResource(workbook, outputStream, context, opts);
+            return new PoiWriteResource(workbook, outputStream, context, opts, scheduler);
         } catch (Throwable error) {
-            closeQuietly(workbook, outputStream);
+            closeResources(workbook, outputStream);
             throw error;
         }
     }
 
     /**
      * Owns a newly created workbook until its MonoSink-to-usingWhen transfer is complete.
-     * Cancellation changes state only; the bounded-elastic acquisition thread closes resources
+     * Cancellation changes state only; the configured acquisition worker closes resources
      * when the transfer did not complete.
      */
     private final class PoiWriteResourceAcquisition {
@@ -185,18 +204,22 @@ public class PoiExcelWriter implements ExcelWriter {
 
         private final ExcelOption[] options;
 
+        private final Scheduler scheduler;
+
         private final AtomicInteger state = new AtomicInteger(ACTIVE);
 
         private PoiWriteResourceAcquisition(OutputStream outputStream,
+                                            Scheduler scheduler,
                                             ExcelOption[] options) {
             this.outputStream = outputStream;
+            this.scheduler = scheduler;
             this.options = options;
         }
 
         private void acquire(MonoSink<PoiWriteResource> sink) {
             PoiWriteResource resource;
             try {
-                resource = createWriteResource(outputStream, options);
+                resource = createWriteResource(outputStream, scheduler, options);
             } catch (Throwable error) {
                 Exceptions.throwIfFatal(error);
                 if (state.compareAndSet(ACTIVE, TRANSFERRED)) {
@@ -206,7 +229,7 @@ public class PoiExcelWriter implements ExcelWriter {
             }
 
             if (state.get() == CANCELLED) {
-                resource.closeQuietly();
+                resource.closeResources();
                 return;
             }
 
@@ -214,7 +237,7 @@ public class PoiExcelWriter implements ExcelWriter {
             if (!state.compareAndSet(ACTIVE, TRANSFERRED)) {
                 // Cancellation won before usingWhen completed the ownership transfer. This still
                 // runs on the acquisition worker, so closing cannot block the cancelling thread.
-                resource.closeQuietly();
+                resource.closeResources();
             }
         }
 
@@ -233,6 +256,8 @@ public class PoiExcelWriter implements ExcelWriter {
 
         private final Options options;
 
+        private final Scheduler scheduler;
+
         private final ReentrantLock lifecycleLock = new ReentrantLock();
 
         private boolean closed;
@@ -240,26 +265,29 @@ public class PoiExcelWriter implements ExcelWriter {
         private PoiWriteResource(Workbook workbook,
                                  OutputStream outputStream,
                                  Context context,
-                                 Options options) {
+                                 Options options,
+                                 Scheduler scheduler) {
             this.workbook = workbook;
             this.outputStream = outputStream;
             this.context = context;
             this.options = options;
+            this.scheduler = scheduler;
         }
 
         private Mono<Void> write(Flux<WritableCell> dataStream) {
             // POI mutates workbook state and performs blocking file I/O. Prefetch one keeps the
             // scheduler handoff bounded while every POI callback stays off non-blocking threads.
             return dataStream
-                .publishOn(Schedulers.boundedElastic(), 1)
+                .publishOn(scheduler, 1)
                 .doOnNext(this::writeCell)
                 .then(Mono.<Void>fromRunnable(this::writeAndClose)
-                          .subscribeOn(Schedulers.boundedElastic()));
+                          .subscribeOn(scheduler));
         }
 
         private void writeCell(WritableCell cell) {
             lifecycleLock.lock();
             try {
+                ensureBlockingThread();
                 if (closed) {
                     throw new IllegalStateException("POI writer is closed");
                 }
@@ -272,11 +300,12 @@ public class PoiExcelWriter implements ExcelWriter {
         private void writeAndClose() {
             lifecycleLock.lock();
             try {
+                ensureBlockingThread();
                 if (closed) {
                     return;
                 }
-                closed = true;
                 PoiExcelWriter.this.writeAndClose(workbook, outputStream);
+                closed = true;
             } finally {
                 lifecycleLock.unlock();
             }
@@ -286,21 +315,30 @@ public class PoiExcelWriter implements ExcelWriter {
             // Cancellation can originate from an event loop. Cleanup is scheduled before taking
             // the lifecycle lock, so cancel never blocks behind an in-flight POI operation.
             return Mono
-                .<Void>fromRunnable(this::closeQuietly)
-                .subscribeOn(Schedulers.boundedElastic());
+                .<Void>fromRunnable(this::closeResources)
+                .subscribeOn(scheduler);
         }
 
-        private void closeQuietly() {
+        private void closeResources() {
             lifecycleLock.lock();
             try {
+                ensureBlockingThread();
                 if (closed) {
                     return;
                 }
                 closed = true;
-                PoiExcelWriter.this.closeQuietly(workbook, outputStream);
+                PoiExcelWriter.this.closeResources(workbook, outputStream);
             } finally {
                 lifecycleLock.unlock();
             }
+        }
+    }
+
+    private static void ensureBlockingThread() {
+        if (Schedulers.isInNonBlockingThread()) {
+            throw new IllegalStateException(
+                "POI blocking scheduler executed on a Reactor non-blocking thread"
+            );
         }
     }
 

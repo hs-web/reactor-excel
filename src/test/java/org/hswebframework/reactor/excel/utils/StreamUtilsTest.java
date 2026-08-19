@@ -13,8 +13,10 @@ import org.reactivestreams.Subscription;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
+import reactor.test.publisher.TestPublisher;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -73,6 +75,97 @@ class StreamUtilsTest {
         }
 
         assertArrayEquals(expected, actual.toByteArray());
+    }
+
+    @Test
+    void bufferShouldUseCallerProvidedBlockingScheduler() {
+        Scheduler scheduler = Schedulers.newBoundedElastic(1, 16, "stream-utils-dedicated");
+        AtomicReference<String> writerThread = new AtomicReference<>();
+        try {
+            byte[] bytes = StreamUtils
+                .buffer(4, scheduler, output -> Mono.fromRunnable(() -> {
+                    writerThread.set(Thread.currentThread().getName());
+                    try {
+                        output.write(new byte[]{1, 2, 3});
+                    } catch (IOException error) {
+                        throw new UncheckedIOException(error);
+                    }
+                }))
+                .reduce(new byte[0], StreamUtilsTest::concat)
+                .block(java.time.Duration.ofSeconds(5));
+
+            assertArrayEquals(new byte[]{1, 2, 3}, bytes);
+            assertTrue(writerThread.get().startsWith("stream-utils-dedicated-"));
+        } finally {
+            scheduler.dispose();
+        }
+    }
+
+    @Test
+    void bufferShouldRejectNonBlockingSchedulerBeforeInvokingWriter() {
+        AtomicBoolean writerInvoked = new AtomicBoolean();
+
+        StepVerifier
+            .create(StreamUtils.buffer(4, Schedulers.parallel(), output -> {
+                writerInvoked.set(true);
+                return Mono.empty();
+            }), 1)
+            .expectErrorMatches(error -> error instanceof IllegalStateException
+                && error.getMessage().contains("non-blocking thread"))
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertFalse(writerInvoked.get(), "writer ran on a non-blocking scheduler");
+    }
+
+    @Test
+    void genuineWriterErrorAfterCancellationShouldBeDropped() throws InterruptedException {
+        IllegalStateException expected = new IllegalStateException("writer failed after cancel");
+        AtomicReference<Throwable> dropped = new AtomicReference<>();
+        AtomicReference<Subscription> subscription = new AtomicReference<>();
+        CountDownLatch writerSubscribed = new CountDownLatch(1);
+        TestPublisher<Void> writer = TestPublisher.createNoncompliant(
+            TestPublisher.Violation.DEFER_CANCELLATION
+        );
+
+        Hooks.onErrorDropped(dropped::set);
+        try {
+            StreamUtils
+                .buffer(4, output -> writer.mono()
+                    .doOnSubscribe(ignore -> writerSubscribed.countDown()))
+                .subscribe(new Subscriber<byte[]>() {
+                    @Override
+                    public void onSubscribe(Subscription value) {
+                        subscription.set(value);
+                        value.request(1);
+                    }
+
+                    @Override
+                    public void onNext(byte[] value) {
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                    }
+
+                    @Override
+                    public void onComplete() {
+                    }
+                });
+
+            assertTrue(writerSubscribed.await(5, TimeUnit.SECONDS),
+                       "blocking writer publisher was not subscribed");
+            subscription.get().cancel();
+            writer.error(expected);
+            assertEquals(expected, dropped.get());
+        } finally {
+            Hooks.resetOnErrorDropped();
+        }
+    }
+
+    private static byte[] concat(byte[] left, byte[] right) {
+        byte[] result = Arrays.copyOf(left, left.length + right.length);
+        System.arraycopy(right, 0, result, left.length, right.length);
+        return result;
     }
 
     @Test

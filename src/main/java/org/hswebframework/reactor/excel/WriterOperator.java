@@ -16,6 +16,8 @@ import java.util.function.Function;
 
 public class WriterOperator<T> {
 
+    private static final int DEFAULT_WRITER_BUFFER_SIZE = 10 * 1024;
+
     private final ExcelWriter writer;
 
     private final List<ExcelOption> options = new ArrayList<>();
@@ -91,7 +93,7 @@ public class WriterOperator<T> {
     }
 
     public Flux<byte[]> writeBuffer(Flux<T> dataStream) {
-        return writeBuffer(dataStream, 10240);
+        return writeBuffer(dataStream, DEFAULT_WRITER_BUFFER_SIZE);
     }
 
     public Flux<byte[]> writeBuffer(Flux<T> dataStream, int buffer) {
@@ -108,7 +110,11 @@ public class WriterOperator<T> {
      * @since 1.0.7
      */
     public Flux<ByteBuf> writeByteBufs(Flux<T> dataStream) {
-        return writeByteBufs(dataStream, ByteBufAllocator.DEFAULT, 10240);
+        return writeByteBufs(
+            dataStream,
+            ByteBufAllocator.DEFAULT,
+            DEFAULT_WRITER_BUFFER_SIZE
+        );
     }
 
     /**

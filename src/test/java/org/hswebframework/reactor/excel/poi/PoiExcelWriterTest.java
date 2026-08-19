@@ -12,6 +12,7 @@ import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellRangeAddress;
 import org.apache.poi.xssf.streaming.SXSSFWorkbook;
 import org.hswebframework.reactor.excel.BlockHoundTestSupport;
+import org.hswebframework.reactor.excel.BlockingSchedulerOption;
 import org.hswebframework.reactor.excel.CellDataType;
 import org.hswebframework.reactor.excel.ReactorExcel;
 import org.hswebframework.reactor.excel.WritableCell;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
 
@@ -187,16 +189,21 @@ class PoiExcelWriterTest {
         AtomicBoolean sourceWasNonBlocking = new AtomicBoolean();
         AtomicBoolean cellMutationWasNonBlocking = new AtomicBoolean(true);
         AtomicBoolean workbookWriteWasNonBlocking = new AtomicBoolean(true);
+        AtomicReference<String> cellThread = new AtomicReference<>();
+        AtomicReference<String> writeThread = new AtomicReference<>();
+        Scheduler scheduler = Schedulers.newBoundedElastic(1, 16, "poi-dedicated");
         PoiExcelWriter writer = new PoiExcelWriter() {
             @Override
             protected void wrapCell(Cell poiCell, WritableCell cell) {
                 cellMutationWasNonBlocking.set(Schedulers.isInNonBlockingThread());
+                cellThread.set(Thread.currentThread().getName());
                 super.wrapCell(poiCell, cell);
             }
 
             @Override
             protected void writeAndClose(Workbook workbook, java.io.OutputStream stream) {
                 workbookWriteWasNonBlocking.set(Schedulers.isInNonBlockingThread());
+                writeThread.set(Thread.currentThread().getName());
                 super.writeAndClose(workbook, stream);
             }
         };
@@ -208,20 +215,59 @@ class PoiExcelWriterTest {
             })
             .flux();
 
-        StepVerifier
-            .create(writer.write(source, UnpooledByteBufAllocator.DEFAULT, 1024))
-            .thenConsumeWhile(buffer -> {
-                ReferenceCountUtil.safeRelease(buffer);
-                return true;
-            })
-            .expectComplete()
-            .verify(java.time.Duration.ofSeconds(10));
+        try {
+            StepVerifier
+                .create(writer.write(
+                    source,
+                    UnpooledByteBufAllocator.DEFAULT,
+                    1024,
+                    BlockingSchedulerOption.of(scheduler)
+                ))
+                .thenConsumeWhile(buffer -> {
+                    ReferenceCountUtil.safeRelease(buffer);
+                    return true;
+                })
+                .expectComplete()
+                .verify(java.time.Duration.ofSeconds(10));
+        } finally {
+            scheduler.dispose();
+        }
 
         assertTrue(sourceWasNonBlocking.get(), "fixture did not use an async non-blocking source");
         assertFalse(cellMutationWasNonBlocking.get(),
                     "POI cell mutation ran on a Reactor non-blocking thread");
         assertFalse(workbookWriteWasNonBlocking.get(),
                     "POI workbook.write ran on a Reactor non-blocking thread");
+        assertTrue(cellThread.get().startsWith("poi-dedicated-"));
+        assertTrue(writeThread.get().startsWith("poi-dedicated-"));
+    }
+
+    @Test
+    void sourceFailureShouldUseCleanupHookWithoutSerializingWorkbook() {
+        IllegalStateException expected = new IllegalStateException("source failed");
+        AtomicInteger successfulWrites = new AtomicInteger();
+        AtomicInteger errorCleanups = new AtomicInteger();
+        PoiExcelWriter writer = new PoiExcelWriter() {
+            @Override
+            protected void writeAndClose(Workbook workbook, OutputStream stream) {
+                successfulWrites.incrementAndGet();
+                super.writeAndClose(workbook, stream);
+            }
+
+            @Override
+            protected void closeResources(Workbook workbook, OutputStream stream) {
+                errorCleanups.incrementAndGet();
+                super.closeResources(workbook, stream);
+            }
+        };
+
+        StepVerifier
+            .create(writer.write(Flux.error(expected), new ByteArrayOutputStream()))
+            .expectErrorMatches(error -> error == expected)
+            .verify(java.time.Duration.ofSeconds(5));
+
+        assertEquals(0, successfulWrites.get(), "source failure serialized a partial workbook");
+        assertEquals(1, errorCleanups.get(), "source failure bypassed the cleanup hook");
     }
 
     @Test
