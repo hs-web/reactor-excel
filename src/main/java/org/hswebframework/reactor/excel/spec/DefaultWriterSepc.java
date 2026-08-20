@@ -1,5 +1,7 @@
 package org.hswebframework.reactor.excel.spec;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import lombok.AllArgsConstructor;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.hswebframework.reactor.excel.ExcelOption;
@@ -33,6 +35,16 @@ class DefaultWriterSepc implements WriterSpec.MultiSheetWriterSpec, WriterSpec.W
                 Flux.concat(cells.values()),
                 output,
                 options.toArray(new ExcelOption[0])
+        );
+    }
+
+    @Override
+    public Flux<ByteBuf> writeByteBufs(ByteBufAllocator allocator, int bufferSize) {
+        return writer.write(
+            Flux.concat(cells.values()),
+            allocator,
+            bufferSize,
+            options.toArray(new ExcelOption[0])
         );
     }
 

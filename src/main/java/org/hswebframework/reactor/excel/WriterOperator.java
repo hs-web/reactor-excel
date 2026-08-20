@@ -1,5 +1,7 @@
 package org.hswebframework.reactor.excel;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import org.apache.commons.beanutils.BeanMap;
 import org.hswebframework.reactor.excel.converter.HeaderCell;
 import org.hswebframework.reactor.excel.converter.MapRowExpander;
@@ -13,6 +15,8 @@ import java.util.*;
 import java.util.function.Function;
 
 public class WriterOperator<T> {
+
+    private static final int DEFAULT_WRITER_BUFFER_SIZE = 10 * 1024;
 
     private final ExcelWriter writer;
 
@@ -89,21 +93,79 @@ public class WriterOperator<T> {
     }
 
     public Flux<byte[]> writeBuffer(Flux<T> dataStream) {
-        return writeBuffer(dataStream, 10240);
+        return writeBuffer(dataStream, DEFAULT_WRITER_BUFFER_SIZE);
     }
 
     public Flux<byte[]> writeBuffer(Flux<T> dataStream, int buffer) {
-        return StreamUtils.buffer(buffer, output -> write(dataStream, output));
+        return writeByteBufs(dataStream, buffer)
+            .map(StreamUtils::releaseToByteArray);
+    }
+
+    /**
+     * Write data as reference-counted buffers using the default allocator and buffer size.
+     * Emitted buffers are owned by the subscriber and must be released after consumption.
+     *
+     * @param dataStream data rows to serialize
+     * @return serialized buffer stream
+     * @since 1.0.7
+     */
+    public Flux<ByteBuf> writeByteBufs(Flux<T> dataStream) {
+        return writeByteBufs(
+            dataStream,
+            ByteBufAllocator.DEFAULT,
+            DEFAULT_WRITER_BUFFER_SIZE
+        );
+    }
+
+    /**
+     * Write data as reference-counted buffers using the default allocator.
+     * Emitted buffers are owned by the subscriber and must be released after consumption.
+     *
+     * @param dataStream data rows to serialize
+     * @param buffer maximum buffer size
+     * @return serialized buffer stream
+     * @since 1.0.7
+     */
+    public Flux<ByteBuf> writeByteBufs(Flux<T> dataStream, int buffer) {
+        return writeByteBufs(dataStream, ByteBufAllocator.DEFAULT, buffer);
+    }
+
+    /**
+     * Write data as bounded reference-counted buffers. Emitted buffers are owned by the
+     * subscriber and must be released after consumption.
+     *
+     * @param dataStream data rows to serialize
+     * @param allocator output buffer allocator
+     * @param buffer maximum buffer size
+     * @return serialized buffer stream
+     * @since 1.0.7
+     */
+    public Flux<ByteBuf> writeByteBufs(Flux<T> dataStream,
+                                       ByteBufAllocator allocator,
+                                       int buffer) {
+        return writer.write(
+            toCells(dataStream),
+            allocator,
+            buffer,
+            options.toArray(new ExcelOption[0])
+        );
     }
 
     public Mono<Void> write(Flux<T> dataStream,
                             OutputStream output) {
+        return writer.write(
+            toCells(dataStream),
+            output,
+            options.toArray(new ExcelOption[0])
+        );
+    }
+
+    private Flux<WritableCell> toCells(Flux<T> dataStream) {
         return Flux.concat(
                 Flux.fromIterable(expander.getHeaders())
                         .index((index, header) -> new HeaderCell(header, index.intValue(), index == expander.getHeaders().size() - 1)),
                 dataStream.index()
-                        .concatMap((idx) -> expander.apply(idx.getT1() + 1, toMap(idx.getT2()))))
-                .as(flux -> writer.write(flux, output, options.toArray(new ExcelOption[0])));
+                        .concatMap((idx) -> expander.apply(idx.getT1() + 1, toMap(idx.getT2())), 1));
 
     }
 
