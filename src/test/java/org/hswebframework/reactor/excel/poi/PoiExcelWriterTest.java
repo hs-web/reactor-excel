@@ -473,6 +473,7 @@ class PoiExcelWriterTest {
         CountDownLatch cancellationFinished = new CountDownLatch(1);
         AtomicReference<TrackingWorkbook> workbook = new AtomicReference<>();
         TrackingOutputStream output = new TrackingOutputStream(null);
+        Scheduler scheduler = Schedulers.newBoundedElastic(1, 16, "poi-cancel-test");
         PoiExcelWriter writer = new PoiExcelWriter() {
             @Override
             protected Workbook createWorkBook() {
@@ -488,29 +489,36 @@ class PoiExcelWriterTest {
                 super.wrapCell(poiCell, cell);
             }
         };
-        reactor.core.Disposable write = writer
-            .write(
-                Flux.just(WritableCell.of(0, 0, 0, CellDataType.STRING, "value", true)),
-                output
-            )
-            .subscribe();
-
-        assertTrue(cellMutationEntered.await(5, TimeUnit.SECONDS), "cell mutation did not start");
-        Mono
-            .fromRunnable(write::dispose)
-            .subscribeOn(Schedulers.parallel())
-            .doFinally(ignored -> cancellationFinished.countDown())
-            .subscribe();
-
         try {
-            assertTrue(cancellationFinished.await(2, TimeUnit.SECONDS),
-                       "cancellation waited for the in-flight cell mutation");
+            reactor.core.Disposable write = writer
+                .write(
+                    Flux.just(WritableCell.of(0, 0, 0, CellDataType.STRING, "value", true)),
+                    output,
+                    BlockingSchedulerOption.of(scheduler)
+                )
+                .subscribe();
+
+            try {
+                assertTrue(cellMutationEntered.await(5, TimeUnit.SECONDS),
+                           "cell mutation did not start");
+                Mono
+                    .fromRunnable(write::dispose)
+                    .subscribeOn(Schedulers.parallel())
+                    .doFinally(ignored -> cancellationFinished.countDown())
+                    .subscribe();
+
+                assertTrue(cancellationFinished.await(2, TimeUnit.SECONDS),
+                           "cancellation waited for the in-flight cell mutation");
+            } finally {
+                releaseCellMutation.countDown();
+                write.dispose();
+            }
+            assertTrue(output.awaitClose(), "cancelled writer did not close its output");
+            assertEquals(1, workbook.get().closeCount(), "cancellation closed workbook more than once");
+            assertEquals(1, output.closeCount(), "cancellation closed output more than once");
         } finally {
-            releaseCellMutation.countDown();
+            scheduler.dispose();
         }
-        assertTrue(output.awaitClose(), "cancelled writer did not close its output");
-        assertEquals(1, workbook.get().closeCount(), "cancellation closed workbook more than once");
-        assertEquals(1, output.closeCount(), "cancellation closed output more than once");
     }
 
     private static PoiExcelWriter trackingWriter(AtomicReference<TrackingWorkbook> workbook,
